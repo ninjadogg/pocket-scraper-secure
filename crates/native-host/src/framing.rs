@@ -1,7 +1,8 @@
 //! Chrome native messaging framing: a 32-bit length in native byte order, then UTF-8
-//! JSON. Both directions are capped at 1 MiB (Chrome's limit for host messages).
+//! JSON. Messages to Chrome are capped at 1 MiB (Chrome's limit); messages from the
+//! extension at 16 MiB.
 
-use pocket_scraper_core::limits::HOST_MESSAGE_MAX;
+use pocket_scraper_core::limits::{HOST_INBOUND_MAX, HOST_MESSAGE_MAX};
 use std::io::{self, Read, Write};
 
 /// Reads one message. `Ok(None)` means Chrome closed the connection.
@@ -13,8 +14,8 @@ pub fn read_message(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
         Err(e) => return Err(e),
     }
     let len = u32::from_ne_bytes(len) as usize;
-    if len > HOST_MESSAGE_MAX {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "message larger than 1 MiB"));
+    if len > HOST_INBOUND_MAX {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "message larger than 16 MiB"));
     }
     let mut body = vec![0u8; len];
     input.read_exact(&mut body)?;
@@ -42,7 +43,7 @@ mod tests {
         assert_eq!(read_message(&mut cursor).unwrap().unwrap(), br#"{"type":"hello","version":1}"#);
         assert!(read_message(&mut cursor).unwrap().is_none(), "EOF ends the session");
 
-        let mut big = ((HOST_MESSAGE_MAX + 1) as u32).to_ne_bytes().to_vec();
+        let mut big = ((HOST_INBOUND_MAX + 1) as u32).to_ne_bytes().to_vec();
         big.extend_from_slice(b"{}");
         assert!(read_message(&mut io::Cursor::new(big)).is_err());
         assert!(write_message(&mut Vec::new(), &vec![b' '; HOST_MESSAGE_MAX + 1]).is_err());

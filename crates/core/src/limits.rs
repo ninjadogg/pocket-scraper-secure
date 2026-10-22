@@ -40,6 +40,9 @@ pub const RUN_TIMEOUT_MAX_MS: u64 = 2_147_483_647;
 
 /// Native messaging: Chrome refuses host messages over 1 MiB.
 pub const HOST_MESSAGE_MAX: usize = 1024 * 1024;
+/// Messages from the extension to the host (Chrome allows 64 MiB); bridge replies can
+/// carry many records.
+pub const HOST_INBOUND_MAX: usize = 16 * 1024 * 1024;
 
 pub const PASSPHRASE_MIN_CHARS: usize = 12;
 pub const PASSPHRASE_MAX_BYTES: usize = 1024;

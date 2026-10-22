@@ -172,10 +172,36 @@ export async function setDraft(draft: Draft): Promise<void> {
   await chrome.storage.local.set({ draft });
 }
 
-export interface Settings { runTimeoutMs: number; autoLockMinutes: number }
-export async function getSettings(): Promise<Settings> {
-  const { settings } = await chrome.storage.local.get('settings');
-  const s = (settings ?? {}) as Partial<Settings>;
+/** `claudeAccess`: the person let Claude (the MCP server) manage Pocket Scraper
+ * through the native host. Off by default, kept under its own key that only the
+ * dashboard's toggle writes (`setClaudeAccess`), so nothing else can write it back. */
+export interface Settings { runTimeoutMs: number; autoLockMinutes: number; claudeAccess: boolean }
+type Tunable = Pick<Settings, 'runTimeoutMs' | 'autoLockMinutes'>;
+function normalise(s: Partial<Tunable>): Tunable {
   const n = (v: unknown, min: number, max: number, fallback: number) => (Number.isInteger(v) && (v as number) >= min && (v as number) <= max ? (v as number) : fallback);
   return { runTimeoutMs: n(s.runTimeoutMs, 10_000, 3_600_000, 180_000), autoLockMinutes: n(s.autoLockMinutes, 1, 240, 10) };
+}
+export async function getSettings(): Promise<Settings> {
+  const { settings, claudeAccess } = await chrome.storage.local.get(['settings', 'claudeAccess']);
+  return { ...normalise((settings ?? {}) as Partial<Tunable>), claudeAccess: claudeAccess === true };
+}
+export async function setClaudeAccess(on: boolean): Promise<void> {
+  await chrome.storage.local.set({ claudeAccess: on });
+}
+let settingsQueue: Promise<unknown> = Promise.resolve();
+/** Merges and validates (one change at a time); out-of-range values are refused,
+ * not silently replaced. */
+export function updateSettings(change: Partial<Tunable>): Promise<Settings> {
+  const next = settingsQueue.then(async () => {
+    const { claudeAccess, ...current } = await getSettings();
+    const merged = { ...current, ...Object.fromEntries(Object.entries(change).filter(([k, v]) => k in current && v !== undefined && v !== null)) } as Tunable;
+    const valid = normalise(merged);
+    for (const key of Object.keys(valid) as (keyof Tunable)[]) {
+      if (valid[key] !== merged[key]) throw new Error(`${key} is out of range`);
+    }
+    await chrome.storage.local.set({ settings: valid });
+    return { ...valid, claudeAccess };
+  });
+  settingsQueue = next.catch(() => undefined);
+  return next;
 }

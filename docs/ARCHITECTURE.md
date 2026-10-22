@@ -50,6 +50,7 @@ around a smaller attack surface:
 | `crates/native-host` | Rust | Native messaging host. Launches headless Chrome over a pipe, drives the run planner with CDP, and seals results. `install` / `uninstall` subcommands write the host manifest. |
 | `extension/` | TypeScript | MV3 extension: service worker, picker, extractor, popup, dashboard. |
 | `pocket-scraper-runner` (in `crates/native-host`) | Rust | Standalone runner for VMs, servers and desktops: signed recipe bundles in, sealed and signed result batches out, on a timer, optionally through an S3-compatible bucket. See `RUNNER.md`. |
+| `pocket-scraper-mcp` (in `crates/native-host`) | Rust | MCP server for Claude. Reaches the extension through an owner-only mailbox and a native-messaging *bridge* that the extension opens only while Claude access is on. See `MCP.md`. |
 | `browser/headless-shell.json` | JSON | The pinned Chrome for Testing headless shell (version and SHA-256 per platform) used for every run outside the person's own tabs. |
 
 ### The run planner

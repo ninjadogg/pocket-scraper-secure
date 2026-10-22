@@ -41,6 +41,8 @@ jobs:
             target/release/pocket-scraper-runner.exe
             target/release/pocket-scraper-host
             target/release/pocket-scraper-host.exe
+            target/release/pocket-scraper-mcp
+            target/release/pocket-scraper-mcp.exe
           if-no-files-found: error
 
   extension:

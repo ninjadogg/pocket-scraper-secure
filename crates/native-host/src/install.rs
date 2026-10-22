@@ -51,6 +51,18 @@ fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<(), String> {
     paths::write_private(path, content, mode).map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
+/// Installs a program. Windows can't replace a running .exe (the bridge host runs
+/// while Claude access is on, the MCP server while Claude is open) but can rename it,
+/// so the old copy is moved aside first.
+fn write_binary(path: &Path, content: &[u8]) -> Result<(), String> {
+    if cfg!(windows) && path.exists() {
+        let aside = path.with_extension("old");
+        let _ = fs::remove_file(&aside);
+        fs::rename(path, &aside).map_err(|e| format!("Could not move the old {} aside: {e}", path.display()))?;
+    }
+    write_file(path, content, 0o700)
+}
+
 pub fn install(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
     let bin = paths::installed_binary();
@@ -58,7 +70,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     private_dir(bin.parent().expect("bin dir")).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bytes = fs::read(&exe).map_err(|e| format!("Could not read {}: {e}", exe.display()))?;
-    write_file(&bin, &bytes, 0o700)?;
+    write_binary(&bin, &bytes)?;
     write_file(&paths::allowed_id_file(), format!("{}\n", o.extension_id).as_bytes(), 0o600)?;
     let manifest = serde_json::json!({
         "name": HOST_NAME,
@@ -88,6 +100,15 @@ pub fn install(args: &[String]) -> Result<(), String> {
         eprintln!("Registered with {browser}: {}", path.display());
     }
     eprintln!("Installed {} (allowed extension {}).", bin.display(), o.extension_id);
+    // The MCP server, when it was built alongside: a stable path for Claude to start.
+    let mcp_name = if cfg!(windows) { "pocket-scraper-mcp.exe" } else { "pocket-scraper-mcp" };
+    let mcp = exe.with_file_name(mcp_name);
+    if mcp.is_file() {
+        let target = bin.with_file_name(mcp_name);
+        let bytes = fs::read(&mcp).map_err(|e| format!("Could not read {}: {e}", mcp.display()))?;
+        write_binary(&target, &bytes)?;
+        eprintln!("Installed {}. To use it from Claude Code:\n  claude mcp add --scope user pocket-scraper-secure -- \"{}\"\nthen turn on Claude access in the dashboard.", target.display(), target.display());
+    }
     let browser = crate::headless::install(&mut |m| eprintln!("{m}"))?;
     eprintln!("Runs use {}", browser.display());
     Ok(())
@@ -106,6 +127,7 @@ pub fn uninstall(args: &[String]) -> Result<(), String> {
         }
     }
     let _ = fs::remove_file(paths::installed_binary());
+    let _ = fs::remove_file(paths::installed_binary().with_file_name(if cfg!(windows) { "pocket-scraper-mcp.exe" } else { "pocket-scraper-mcp" }));
     let _ = fs::remove_file(paths::allowed_id_file());
     if o.purge_profiles {
         let profiles = paths::data_dir().join("profiles");

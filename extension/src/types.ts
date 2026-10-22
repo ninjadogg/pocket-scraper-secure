@@ -57,7 +57,8 @@ export interface RunRecord {
 
 export interface SealedRecord { key: string; sealed: string }
 /** A runner enrolled to send result batches (its Ed25519 public key, base64). */
-export interface Runner { name: string; key: string; fingerprint: string; addedAt: string }
+/** `pending`: enrolled by Claude; its batches are refused until the person approves it. */
+export interface Runner { name: string; key: string; fingerprint: string; addedAt: string; pending?: boolean }
 /** core::bundle::Batch as JSON. */
 export interface Batch {
   batchId: string; runnerKey: string; vaultPublicKey: string; recipeId: string; runId: string;

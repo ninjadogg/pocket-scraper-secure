@@ -1,4 +1,5 @@
-//! The native messaging session: one request at a time from the extension.
+//! The native messaging session: one request at a time from the extension, or, once
+//! the extension asks for it, the bridge that carries the MCP server's commands.
 
 use crate::browser::{self, Browser};
 use crate::driver::{self, Outcome};
@@ -8,12 +9,59 @@ use pocket_scraper_core::limits::HOST_MESSAGE_MAX;
 use pocket_scraper_core::protocol::{self, chunk, seal_rows, Request, Response, PROTOCOL_VERSION};
 use pocket_scraper_core::url;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-pub fn serve(input: &mut impl Read, output: &mut impl Write) -> io::Result<()> {
+fn send<W: Write>(output: &Mutex<W>, response: &Response) -> io::Result<()> {
+    write_message(&mut *output.lock().expect("output lock"), &serde_json::to_vec(response).expect("response serialises"))
+}
+
+pub fn serve<W: Write + Send + 'static>(input: &mut impl Read, output: W) -> io::Result<()> {
+    let output = Arc::new(Mutex::new(output));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut bridge: Option<(crate::mailbox::BridgeLock, std::thread::JoinHandle<()>)> = None;
     while let Some(bytes) = read_message(input)? {
-        for response in handle(&bytes) {
-            write_message(output, &serde_json::to_vec(&response).expect("response serialises"))?;
+        match Request::from_json(&bytes) {
+            Ok(Request::Bridge {}) if bridge.is_none() => match crate::mailbox::claim_bridge() {
+                Err(message) => {
+                    // The extension closes this connection and tries again later.
+                    send(&output, &Response::Error { message })?;
+                    return Ok(());
+                }
+                Ok(lock) => {
+                    send(&output, &Response::BridgeReady {})?;
+                    let (out, stop) = (output.clone(), stop.clone());
+                    let worker = std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            for r in crate::mailbox::take_requests() {
+                                if send(&out, &r).is_err() {
+                                    return;
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(150));
+                        }
+                    });
+                    bridge = Some((lock, worker));
+                }
+            },
+            Ok(Request::BridgeReply { id, ok, sealed, error }) if bridge.is_some() => {
+                if let Err(message) = crate::mailbox::write_reply(&id, ok, sealed, error) {
+                    send(&output, &Response::Error { message })?;
+                }
+            }
+            _ => {
+                for response in handle(&bytes) {
+                    send(&output, &response)?;
+                }
+            }
         }
+    }
+    stop.store(true, Ordering::Relaxed);
+    if let Some((_lock, worker)) = bridge {
+        let _ = worker.join();
+        // Nothing waiting is delivered to a later bridge.
+        crate::mailbox::clear_requests();
     }
     Ok(())
 }
@@ -91,6 +139,8 @@ pub fn handle(bytes: &[u8]) -> Vec<Response> {
                 }
             }
         },
+        Request::Bridge {} => vec![Response::Error { message: "This connection is already a bridge".into() }],
+        Request::BridgeReply { .. } => vec![Response::Error { message: "No bridge is open on this connection".into() }],
         Request::CollectBatches { retry_deferred } => crate::transport::collect(20, retry_deferred),
         Request::AckBatches { keys, deferred } => vec![crate::transport::ack(keys, deferred)],
         Request::CloseSession { url } => match url::parse(&url) {

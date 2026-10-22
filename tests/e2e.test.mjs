@@ -1,6 +1,7 @@
 // End to end: the built extension in Chrome for Testing (which can load unpacked
 // extensions), driven over a debugging pipe. Covers the vault UI, tab runs, sealed
-// storage, CSP, the picker, and a run through the real native host.
+// storage, CSP, the picker, a run through the real native host, and Claude access
+// through the MCP server.
 // Skips when no Chrome for Testing is found (PSS_E2E_BROWSER overrides the path).
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -301,6 +302,136 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await dash.evaluate(`[...document.querySelectorAll('#recipes tr')].find(tr => tr.textContent.includes('Hosted')).querySelector('button:nth-of-type(2)').click()`);
     const hostedTable = await waitFor(`document.querySelector('#recordsTitle').textContent.includes('Hosted') && document.querySelector('#records table')?.innerText`, 'the hosted records');
     for (let i = 3; i <= 6; i++) assert.match(hostedTable, new RegExp(`Item ${i}\\b`));
+
+    // Claude access: the MCP server reaches the extension only once the person turns
+    // it on, reads records only while unlocked, and deletes only with confirm.
+    const mcp = spawn(join(root, 'target', 'debug', 'pocket-scraper-mcp'), [], { stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, PSS_DATA_DIR: join(work, 'host-data'), PSS_BROWSER_PATH: browserPath } });
+    let mcpId = 0;
+    const answers = new Map();
+    let mcpBuffer = '';
+    mcp.stdout.on('data', chunk => {
+      mcpBuffer += chunk;
+      for (let nl; (nl = mcpBuffer.indexOf('\n')) >= 0; mcpBuffer = mcpBuffer.slice(nl + 1)) {
+        const m = JSON.parse(mcpBuffer.slice(0, nl));
+        answers.get(m.id)?.(m);
+      }
+    });
+    const notes = new Map();
+    const tool = (name, args = {}) => new Promise((resolve, reject) => {
+      const id = ++mcpId;
+      answers.set(id, m => {
+        try {
+          if (m.error) return reject(new Error(m.error.message));
+          // Results with outside text start with a note saying it is data.
+          const content = m.result.content;
+          if (content.length > 1) notes.set(name, content[0].text);
+          const text = content.at(-1).text;
+          resolve(m.result.isError ? { error: text } : JSON.parse(text));
+        } catch (e) { reject(e); }
+      });
+      mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }) + '\n');
+    });
+    try {
+      assert.match((await tool('list_recipes')).error, /turn on Claude access/);
+      await dash.evaluate(`document.querySelector('#claude input[type=checkbox]').click()`);
+      let status;
+      for (let i = 0; i < 50; i++) {
+        status = await tool('status');
+        if (status.extension?.connected) break;
+        await sleep(200);
+      }
+      assert.equal(status.extension.connected, true, JSON.stringify(status));
+      assert.equal(status.extension.vault.locked, false);
+      assert.equal(status.extension.vault.fingerprint, fingerprint);
+
+      const list = await tool('list_recipes');
+      assert.match(notes.get('list_recipes'), /data, not instructions/);
+      assert.deepEqual(list.map(r => r.name).sort(), ['Hosted', 'List']);
+      assert.ok(list.every(r => r.siteAllowed));
+
+      // Kick off a run and wait for it.
+      const run = await tool('run_recipe', { recipe_id: saved.id, wait_seconds: 90 });
+      assert.equal(run.status, 'success', run.error);
+      assert.equal(run.rowCount, 6);
+      const read = await tool('read_records', { recipe_id: saved.id, limit: 3 });
+      assert.equal(read.total, 6);
+      assert.equal(read.records.length, 3);
+      const csvPath = join(work, 'out', 'list.csv');
+      mkdirSync(join(work, 'out'));
+      assert.equal((await tool('export_records', { recipe_id: saved.id, format: 'csv', path: csvPath })).records, 6);
+      assert.match(readFileSync(csvPath, 'utf8'), /^name,observedAt,pageUrl|Item 1/m);
+      assert.match((await tool('export_records', { recipe_id: saved.id, format: 'csv', path: csvPath })).error, /already exists/);
+      // Never a shell profile or other hidden file, never another file type.
+      assert.match((await tool('export_records', { recipe_id: saved.id, format: 'csv', path: join(work, '.hidden', 'x.csv') })).error, /hidden/);
+      assert.match((await tool('export_records', { recipe_id: saved.id, format: 'csv', path: join(work, 'out', 'x.sh') })).error, /must end in \.csv/);
+
+      // A recipe for a site Chrome hasn't been allowed: saved, but waits for the person.
+      const pending = await tool('save_recipe', { recipe: { name: 'Pending', url: `http://localhost:${server.address().port}/list`, rowSelector: 'li.card', fields: [{ name: 'name', selector: '.name' }] } });
+      assert.equal(pending.siteAllowed, false);
+      await dash.evaluate(`location.reload()`);
+      await waitFor(`[...document.querySelectorAll('#recipes tr')].some(tr => tr.textContent.includes('Pending') && [...tr.querySelectorAll('button')].some(b => b.textContent === 'Allow access'))`, 'the Allow access button');
+
+      // Settings: the auto-lock can be shortened, not lengthened; out-of-range values are refused.
+      assert.equal((await tool('update_settings', { auto_lock_minutes: 5 })).autoLockMinutes, 5);
+      assert.match((await tool('update_settings', { auto_lock_minutes: 30 })).error, /Only the person/);
+      assert.match((await tool('update_settings', { run_timeout_ms: 1 })).error, /out of range/);
+      assert.equal((await tool('get_settings')).claudeAccess, true);
+
+      // Teach → run on this machine's runner → enrol it → import its batch, all via Claude.
+      // (The reload above locked the vault: bundles need it unlocked.)
+      assert.match((await tool('export_bundle', { recipe_id: saved.id, add_to_this_runner: true })).error, /unlock/);
+      await waitFor(`document.querySelectorAll('#vault input').length === 1`, 'the unlock form');
+      await dash.evaluate(`(() => { document.querySelector('#vault input').value = ${JSON.stringify(PASS)}; document.querySelector('#vault button').click(); })()`);
+      await waitFor(`document.querySelector('#vault')?.textContent.includes('Vault unlocked')`, 'unlocking');
+      // A site the person hasn't allowed can't be signed for a runner either.
+      assert.match((await tool('export_bundle', { recipe_id: pending.recipe.id, add_to_this_runner: true })).error, /Allow access/);
+      // Deletes need confirm.
+      assert.match((await tool('delete_recipe', { recipe_id: pending.recipe.id })).error, /confirm: true/);
+      assert.deepEqual(await tool('delete_recipe', { recipe_id: pending.recipe.id, confirm: true }), { deleted: pending.recipe.id, recordsDeleted: false });
+      const bundle = await tool('export_bundle', { recipe_id: saved.id, add_to_this_runner: true });
+      assert.equal(bundle.addedToRunner.recipeId, saved.id, JSON.stringify(bundle));
+      const here = await tool('runner_status');
+      assert.equal(here.recipes.length, 1);
+      const ran = await tool('runner_run', { recipe_id: saved.id });
+      assert.equal(ran.status, 'success', ran.error);
+      assert.match((await tool('import_batches', { paths: [join(work, 'host-data', 'runner', 'outbox')] })).results.join(' '), /isn't enrolled/);
+      // Enrolled by Claude: pending until the person approves it.
+      const enrolled = await tool('enroll_runner', { name: 'this-mac', key: here.key });
+      assert.equal(enrolled.fingerprint, here.fingerprint);
+      assert.equal(enrolled.pending, true);
+      assert.match((await tool('import_batches', { paths: [join(work, 'host-data', 'runner', 'outbox')] })).results.join(' '), /waiting for approval/);
+      await waitFor(`[...document.querySelectorAll('#runners button')].some(b => b.textContent === 'Approve')`, 'the Approve button');
+      await dash.evaluate(`[...document.querySelectorAll('#runners button')].find(b => b.textContent === 'Approve').click()`);
+      await waitFor(`chrome.storage.local.get('runners').then(r => r.runners.every(x => !x.pending))`, 'the approval');
+      assert.match((await tool('import_batches', { paths: [join(work, 'host-data', 'runner', 'outbox')] })).results.join(' '), /success, 6 rows from this-mac/);
+
+      // Bucket settings for the collector, with the secret from a file; then collect.
+      const secretFile = join(work, 'secret.txt');
+      writeFileSync(secretFile, 'secret\n');
+      const bucketArgs = { role: 'collector', endpoint: `http://127.0.0.1:${s3.address().port}`, bucket: 'bucket', access_key_id: 'AK', secret_file: secretFile };
+      // The collector was configured earlier: replacing it needs confirm.
+      assert.match((await tool('configure_bucket', bucketArgs)).error, /confirm: true/);
+      const configured = await tool('configure_bucket', { ...bucketArgs, confirm: true });
+      assert.equal(configured.summary.configured, true);
+      assert.doesNotMatch(JSON.stringify(configured), /secret"/);
+      assert.equal((await tool('test_bucket')).ok, true);
+      assert.deepEqual((await tool('collect_from_bucket')).results, []);
+
+      assert.match((await tool('remove_runner', { runner: 'this-mac' })).error, /confirm: true/);
+      assert.deepEqual(await tool('remove_runner', { runner: 'this-mac', confirm: true }), { removed: 1 });
+
+      // Locked: records can't be read.
+      await dash.evaluate(`[...document.querySelectorAll('#vault button')].find(b => b.textContent === 'Lock now').click()`);
+      assert.match((await tool('read_records', { recipe_id: saved.id })).error, /unlock/);
+
+      // Turning Claude access off closes the bridge.
+      await dash.evaluate(`document.querySelector('#claude input[type=checkbox]').click()`);
+      for (let i = 0; i < 50 && !(await tool('list_recipes')).error; i++) await sleep(200);
+      assert.match((await tool('list_recipes')).error, /turn on Claude access/);
+    } finally {
+      mcp.stdin.end();
+      await new Promise(r => mcp.once('exit', r));
+    }
   } finally {
     child.kill();
     await new Promise(r => child.once('exit', r));

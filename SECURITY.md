@@ -44,6 +44,9 @@ public issues. Test only systems and accounts you own or may test.
 - Anyone who can write your Chrome profile can make later runs seal to their own
   key. You'd notice at the next unlock.
 - A forgotten passphrase cannot be recovered.
+- While **Claude access** is on, programs running as your OS user can drive the
+  extension through the MCP mailbox. Records stay unreadable while the vault is
+  locked. Keep it off when you aren't using it (see docs/MCP.md).
 - A runner machine that is taken over can't read results, but it can use its website
   sessions and send false data in its own name. Remove it under Runners to stop
   accepting its batches.

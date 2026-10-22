@@ -184,25 +184,39 @@ pub fn ack(keys: Vec<String>, deferred: Vec<String>) -> Response {
 }
 
 /// Splits at character boundaries into pieces of at most `max` bytes.
-fn split(text: &str, max: usize) -> Vec<String> {
+/// Splits `text` into pieces whose JSON string encoding is at most `max` bytes, so a
+/// piece sent inside a JSON message stays under the limit whatever it contains
+/// (quotes and control characters grow when escaped).
+pub fn split(text: &str, max: usize) -> Vec<String> {
+    let escaped = |c: char| match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    };
     let mut parts = vec![];
-    let mut rest = text;
-    while !rest.is_empty() {
-        let mut end = rest.len().min(max);
-        while !rest.is_char_boundary(end) {
-            end -= 1;
+    let (mut start, mut size) = (0, 0);
+    for (i, c) in text.char_indices() {
+        let n = escaped(c);
+        if size + n > max && i > start {
+            parts.push(text[start..i].to_string());
+            (start, size) = (i, 0);
         }
-        parts.push(rest[..end].to_string());
-        rest = &rest[end..];
+        size += n;
     }
-    if parts.is_empty() {
-        parts.push(String::new());
-    }
+    parts.push(text[start..].to_string());
     parts
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pieces_stay_small_once_escaped() {
+        let text = "\"\\\u{1}x".repeat(1000);
+        let parts = super::split(&text, 600);
+        assert_eq!(parts.concat(), text);
+        assert!(parts.iter().all(|p| serde_json::to_string(p).unwrap().len() <= 602), "{:?}", parts.iter().map(|p| serde_json::to_string(p).unwrap().len()).max());
+    }
+
     #[test]
     fn splits_at_character_boundaries() {
         let text = "ab“cd”ef".repeat(3);

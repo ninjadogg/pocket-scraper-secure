@@ -5,8 +5,9 @@ import type { UnlockedVault } from '../build/core/pocket_scraper_core_wasm.js';
 import { loadCore, type Core } from './core.js';
 import { $, download, h, send } from './dom.js';
 import { ackBatches, collectBatches } from './host.js';
+import { importBatchFiles, type BatchFile, type ImportOutcome } from './importer.js';
 import * as store from './store.js';
-import type { Batch, PlainRecord, RecipeEntry, Runner, RunRecord } from './types.js';
+import type { PlainRecord, RecipeEntry, Runner, RunRecord } from './types.js';
 
 let core: Core;
 let vault: UnlockedVault | null = null;
@@ -106,18 +107,26 @@ async function renderRecipes() {
   $('host').textContent = host.installed ? `Native host ${host.version} installed.` : 'Native host not installed: runs use a background tab in this browser.';
   $('collect').hidden = !host.installed;
   $('retryDeferred').hidden = !host.installed;
-  const rows = await Promise.all(Object.values(recipes).sort((a, b) => a.recipe.name.localeCompare(b.recipe.name)).map(async e => recipeRow(e, await store.countRecords(e.recipe.id), host.installed)));
+  const rows = await Promise.all(Object.values(recipes).sort((a, b) => a.recipe.name.localeCompare(b.recipe.name)).map(async e =>
+    recipeRow(e, await store.countRecords(e.recipe.id), host.installed, await chrome.permissions.contains({ origins: [new URL(e.recipe.url).origin + '/*'] }))));
   $('recipes').replaceChildren(
     h('tr', {}, ...['Recipe', 'Site', 'Schedule', 'Runs in', 'Records', ''].map(t => h('th', {}, t))),
     ...(rows.length ? rows : [h('tr', {}, h('td', { colSpan: 6, className: 'small' }, 'No recipes yet. Use the toolbar popup on a website to create one.'))]));
 }
 
-function recipeRow(entry: RecipeEntry, records: number, hostInstalled: boolean): HTMLElement {
+function recipeRow(entry: RecipeEntry, records: number, hostInstalled: boolean, siteAllowed: boolean): HTMLElement {
   const r = entry.recipe;
   const act = (label: string, fn: () => Promise<unknown>) => h('button', { onclick: async () => { try { await fn(); } catch (e) { say((e as Error).message, true); } } }, label);
   const actions = h('div', { className: 'actions' },
     act('Run now', async () => { await send({ type: 'runNow', id: r.id }); say(`Running ${r.name}…`); }),
     act('Records', () => showRecords(r.id)));
+  if (!siteAllowed) {
+    // Saved by Claude (which can't grant permissions): one click from the person does.
+    const origin = new URL(r.url).origin;
+    actions.prepend(act('Allow access', async () => {
+      if (await chrome.permissions.request({ origins: [origin + '/*'] })) { say(`Access to ${origin} allowed.`); await renderRecipes(); }
+    }));
+  }
   if (vault) {
     actions.append(act('Export for runner', async () => {
       const { runTimeoutMs } = await store.getSettings();
@@ -154,16 +163,10 @@ function recipeRow(entry: RecipeEntry, records: number, hostInstalled: boolean):
     h('td', {}, actions));
 }
 
-async function showRecords(recipeId: string) {
-  selected = recipeId;
-  const entry = (await store.getRecipes())[recipeId];
-  if (!entry) return;
-  $('recordsTitle').textContent = `Records: ${entry.recipe.name}`;
-  if (!vault) {
-    $('records').replaceChildren(h('p', { className: 'small' }, 'Unlock the vault to read records.'));
-    return;
-  }
-  await touch();
+/** Opens a recipe's records (newest first), removing repeat copies from later runs.
+ * Only while unlocked. */
+async function openRecords(recipeId: string): Promise<{ records: PlainRecord[]; duplicates: string[]; unreadable: number }> {
+  if (!vault) throw new Error('The vault is locked.');
   const stored = await store.listRecords(recipeId);
   let opened: [string, PlainRecord][] = [];
   let unreadable = 0;
@@ -181,6 +184,73 @@ async function showRecords(recipeId: string) {
   }
   const records = opened.map(([, r]) => r);
   records.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+  return { records, duplicates, unreadable };
+}
+
+/** Requests from Claude (via the service worker) that need the unlocked vault. They
+ * don't count as activity: the vault still locks on its own schedule. */
+async function vaultCommand(command: string, args: Record<string, unknown>): Promise<unknown> {
+  const recipeId = String(args.recipeId ?? args.id ?? '');
+  const entry = (await store.getRecipes())[recipeId];
+  if (!entry) throw new Error('Unknown recipe');
+  if (command === 'readRecords') {
+    const { records, unreadable } = await openRecords(recipeId);
+    const limit = Math.min(5000, Math.max(1, Number(args.limit) || 100));
+    return { total: records.length, unreadable, records: records.slice(0, limit) };
+  }
+  if (command === 'exportRecords') {
+    const { records } = await openRecords(recipeId);
+    const text = args.format === 'csv' ? core.toCsv(JSON.stringify(entry.recipe.fields.map(f => f.name)), JSON.stringify(records)) : JSON.stringify(records, null, 2);
+    return { text, count: records.length };
+  }
+  if (command === 'exportBundle') {
+    // A bundle lets runners use this site's sign-ins: only for sites the person allowed.
+    const origin = new URL(entry.recipe.url).origin;
+    if (!(await chrome.permissions.contains({ origins: [origin + '/*'] }))) throw new Error(`Allow access to ${origin} in the dashboard first.`);
+    const { runTimeoutMs } = await store.getSettings();
+    const header = await store.getVaultHeader();
+    return { bundle: vault!.exportBundle(JSON.stringify(entry.recipe), new Date().toISOString(), runTimeoutMs), fingerprint: header ? core.vaultFingerprint(header) : '' };
+  }
+  throw new Error(`Unknown vault command ${command}`);
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only the extension's own service worker relays Claude's requests.
+  if (message?.type !== 'vaultRequest' || sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('background.js')) return false;
+  // A locked dashboard stays silent, so an unlocked one (another tab) can answer.
+  if (!vault) return false;
+  if (message.command === 'vaultState') {
+    sendResponse({ ok: true, result: { unlocked: true } });
+    return false;
+  }
+  void vaultCommand(String(message.command), (message.args ?? {}) as Record<string, unknown>).then(
+    result => sendResponse({ ok: true, result }),
+    (error: unknown) => sendResponse({ ok: false, error: String((error as Error)?.message ?? error) }));
+  return true;
+});
+
+async function renderClaude() {
+  const { claudeAccess } = await store.getSettings();
+  const toggle = h('input', { type: 'checkbox', checked: claudeAccess, onchange: async () => {
+    await store.setClaudeAccess(toggle.checked);
+    say(toggle.checked ? 'Claude access on: the MCP server can now manage Pocket Scraper Secure.' : 'Claude access off.');
+  } });
+  $('claude').replaceChildren(
+    h('label', {}, toggle, 'Let Claude manage Pocket Scraper Secure (MCP)'),
+    h('p', { className: 'small' }, 'Claude can then list, create and run recipes, manage runners, import results and change settings. It can read records only while this dashboard is unlocked, and deletes need your confirmation. Needs the native host and pocket-scraper-mcp (see docs/MCP.md).'));
+}
+
+async function showRecords(recipeId: string) {
+  selected = recipeId;
+  const entry = (await store.getRecipes())[recipeId];
+  if (!entry) return;
+  $('recordsTitle').textContent = `Records: ${entry.recipe.name}`;
+  if (!vault) {
+    $('records').replaceChildren(h('p', { className: 'small' }, 'Unlock the vault to read records.'));
+    return;
+  }
+  await touch();
+  const { records, duplicates, unreadable } = await openRecords(recipeId);
   const names = entry.recipe.fields.map(f => f.name);
   const shown = records.slice(0, 500);
   const safeName = entry.recipe.name.replace(/[^\w.-]+/g, '_').slice(0, 60) || 'records';
@@ -207,6 +277,11 @@ async function renderRunners() {
   $('runners').replaceChildren(
     ...runners.map(r => h('div', { className: 'row' },
       h('span', {}, r.name), h('code', { className: 'small' }, r.fingerprint),
+      ...(r.pending ? [h('span', { className: 'small' }, 'Added by Claude: compare the fingerprint with what the runner printed.'),
+        h('button', { className: 'tight', onclick: async () => {
+          await store.setRunners((await store.getRunners()).map(x => (x.key === r.key ? { ...x, pending: false } : x)));
+          say(`Approved ${r.name}.`);
+        } }, 'Approve')] : []),
       h('button', { className: 'tight', onclick: async () => {
         if (!confirm(`Remove runner “${r.name}”? Its future results will be refused.`)) return;
         await store.setRunners((await store.getRunners()).filter(x => x.key !== r.key));
@@ -227,55 +302,10 @@ async function renderRunners() {
     shown);
 }
 
-type BatchFile = { name: string; text: () => Promise<string>; size: number };
-type ImportOutcome = { handled: string[]; deferred: string[] };
-
-/** Imports result batch files: signed by an enrolled runner, sealed to this vault,
- * each at most once. Works while the vault is locked (records stay sealed).
- * `handled` were dealt with for good; `deferred` may succeed later (runner not
- * enrolled yet, recipe missing); anything else (e.g. storage failed) is retried. */
+/** Imports batch files and shows what happened. */
 async function importBatches(files: BatchFile[], skipped: string[] = []): Promise<ImportOutcome> {
-  const outcome: ImportOutcome = { handled: [], deferred: [] };
-  const header = await store.getVaultHeader();
-  if (!header) { say('Create the vault first.', true); return outcome; }
-  const runners = await store.getRunners();
-  const recipes = await store.getRecipes();
-  const lines: string[] = [];
-  const now = new Date().toISOString();
-  for (const file of files) {
-    let batch: Batch;
-    try {
-      if (file.size > 8 * 1024 * 1024) throw new Error('larger than 8 MB');
-      batch = JSON.parse(core.openBatch(await file.text(), JSON.stringify(runners.map(r => r.key)), header)) as Batch;
-    } catch (e) {
-      const message = (e as Error).message;
-      lines.push(`${file.name}: refused (${message})`);
-      // From a runner that isn't enrolled yet: keep it for later. Anything else
-      // (tampered, another vault, malformed) never becomes valid.
-      (/isn't enrolled/.test(message) ? outcome.deferred : outcome.handled).push(file.name);
-      continue;
-    }
-    if (!recipes[batch.recipeId]) {
-      lines.push(`${file.name}: set aside (its recipe isn't here; remove it from the runner with: pocket-scraper-runner remove ${batch.recipeId})`);
-      outcome.deferred.push(file.name);
-      continue;
-    }
-    const runner = runners.find(r => r.key === batch.runnerKey)!;
-    // Runner-supplied times can't be in the future (they order and prune run history).
-    const clamp = (t: string) => (t > now ? now : t);
-    try {
-      const result = await store.importBatch(batch.batchId, batch.recipeId, batch.records, {
-        id: `batch-${batch.batchId}`, recipeId: batch.recipeId, via: 'runner', runner: runner.name, trigger: 'schedule',
-        startedAt: clamp(batch.startedAt), finishedAt: clamp(batch.finishedAt), status: batch.status, rowCount: batch.rowCount,
-        warnings: batch.warnings, ...(batch.error ? { error: batch.error } : {})
-      });
-      lines.push(result === 'duplicate' ? `${file.name}: already imported` : `${file.name}: ${batch.status.replace('_', ' ')}, ${batch.rowCount} rows from ${runner.name}`);
-      outcome.handled.push(file.name);
-    } catch (e) {
-      lines.push(`${file.name}: not saved, will retry (${(e as Error).message})`);
-    }
-  }
-  for (const key of skipped) lines.push(`${key}: couldn't be fetched this time`);
+  const outcome = await importBatchFiles(core, files);
+  const lines = [...outcome.lines, ...skipped.map(key => `${key}: couldn't be fetched this time`)];
   $('importMessage').textContent = lines.join(' · ');
   await renderRecipes();
   await renderRuns();
@@ -314,6 +344,7 @@ async function renderRuns() {
   for (const event of ['pointerdown', 'keydown']) document.addEventListener(event, () => void touch());
   window.addEventListener('pagehide', () => vault?.free());
   await renderVault();
+  await renderClaude();
   await renderRecipes();
   await renderRunners();
   await renderRuns();
@@ -323,6 +354,8 @@ async function renderRuns() {
   ($('retryDeferred') as HTMLButtonElement).onclick = () => void collect(true).catch(e => say((e as Error).message, true));
   chrome.storage.onChanged.addListener(changes => {
     if (changes.recipes) void renderRecipes();
+    if (changes.runners) void renderRunners();
+    if (changes.claudeAccess) void renderClaude();
     if (changes.vault && !vault) void renderVault();
   });
   setInterval(() => { if (document.visibilityState === 'visible') void renderRuns(); }, 3_000);

@@ -2,7 +2,7 @@
 //! records. Both directions are validated: Chrome only lets this extension start the
 //! host, but neither side trusts the other's input.
 
-use crate::limits::{HOST_MESSAGE_MAX, ID_MAX, RUN_TIMEOUT_MAX_MS};
+use crate::limits::{HOST_INBOUND_MAX, ID_MAX, RUN_TIMEOUT_MAX_MS};
 use crate::records::{new_record_key, PlainRecord, Row};
 use crate::recipe::{Recipe, RecipeInput};
 use crate::vault::{self, b64};
@@ -42,6 +42,19 @@ pub enum Request {
         #[serde(default)]
         deferred: Vec<String>,
     },
+    /// Keep this connection open as the bridge for the MCP server. The extension only
+    /// asks when the person turned Claude access on.
+    Bridge {},
+    /// The extension's answer to a bridged command.
+    BridgeReply {
+        id: String,
+        ok: bool,
+        /// The answer, sealed to the request's one-time key (base64).
+        #[serde(default)]
+        sealed: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 /// A validated `Request::Run`.
@@ -55,8 +68,8 @@ pub struct RunRequest {
 
 impl Request {
     pub fn from_json(json: &[u8]) -> Result<Request, Error> {
-        if json.len() > HOST_MESSAGE_MAX {
-            return Err(Error::invalid("Message is larger than 1 MiB"));
+        if json.len() > HOST_INBOUND_MAX {
+            return Err(Error::invalid("Message is larger than 16 MiB"));
         }
         serde_json::from_slice(json).map_err(|e| Error::invalid(format!("Message is malformed: {e}")))
     }
@@ -89,6 +102,9 @@ pub enum Response {
     BatchSkipped { key: String, reason: String },
     CollectDone { count: usize, more: bool },
     Acked { count: usize },
+    BridgeReady {},
+    /// A command from the MCP server for the extension, as JSON text in parts.
+    BridgeRequest { id: String, part: usize, parts: usize, text: String },
     Error { message: String },
 }
 
@@ -152,6 +168,7 @@ fn check_timestamp(ts: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::HOST_MESSAGE_MAX;
     use crate::vault::{create, open, record_aad, unlock, KdfParams};
 
     #[test]
@@ -173,7 +190,7 @@ mod tests {
         bad["recipe"]["url"] = "file:///etc/passwd".into();
         let Request::Run { run_id, recipe, public_key, run_timeout_ms, observed_at } = Request::from_json(bad.to_string().as_bytes()).unwrap() else { panic!() };
         assert!(validate_run(run_id, recipe, public_key, run_timeout_ms, observed_at).is_err());
-        assert!(Request::from_json(&vec![b' '; HOST_MESSAGE_MAX + 1]).is_err());
+        assert!(Request::from_json(&vec![b' '; HOST_INBOUND_MAX + 1]).is_err());
         assert!(check_id("../x").is_err());
     }
 

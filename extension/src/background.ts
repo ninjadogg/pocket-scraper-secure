@@ -2,9 +2,10 @@
 // secrets: runs seal results to the vault's public key, which needs no passphrase.
 import { loadCore } from './core.js';
 import { runInTab } from './driver-tab.js';
-import { hostStatus, runOnHost, sessionCommand } from './host.js';
+import { HOST_NAME, hostStatus, runOnHost, sessionCommand } from './host.js';
+import { importBatchFiles } from './importer.js';
 import * as store from './store.js';
-import type { Draft, FieldKind, PageRequest, PickMessage, PickMode, Recipe, RecipeEntry, RunOutcome, RunRecord } from './types.js';
+import type { Draft, FieldKind, PageRequest, PickMessage, PickMode, Recipe, RecipeEntry, Runner, RunOutcome, RunRecord } from './types.js';
 
 const MAX_CONCURRENT_RUNS = 2;
 const ALARM_PREFIX = 'recipe:';
@@ -119,12 +120,14 @@ async function handlePage(m: PageRequest): Promise<unknown> {
   }
 }
 
-async function saveRecipe(input: unknown): Promise<Recipe> {
+/** `allowPending`: save even before the site is allowed (requests from Claude, which
+ * can't grant permissions; the dashboard then offers Allow access). */
+async function saveRecipe(input: unknown, allowPending = false): Promise<Recipe> {
   const core = await loadCore();
   const json = JSON.stringify(input);
   const recipe = JSON.parse(core.validateRecipe(json)) as Recipe;
   const origin = core.recipeOrigin(json);
-  if (!(await chrome.permissions.contains({ origins: [origin + '/*'] }))) {
+  if (!allowPending && !(await chrome.permissions.contains({ origins: [origin + '/*'] }))) {
     throw new Error(`Allow Pocket Scraper Secure to access ${origin} first.`);
   }
   await mutateRecipes(recipes => {
@@ -148,7 +151,7 @@ async function setAttention(url: string, needsAttention: boolean) {
  * the run is under way. The slot is reserved before the first await, so a click
  * racing an alarm can't start the same recipe twice or exceed the limit.
  */
-async function startRun(id: string, trigger: RunRecord['trigger']): Promise<string | undefined> {
+async function startRun(id: string, trigger: RunRecord['trigger'], runId: string = crypto.randomUUID()): Promise<string | undefined> {
   if (running.has(id)) return 'This recipe is already running.';
   if (running.size >= MAX_CONCURRENT_RUNS) return 'Too many runs in progress. Wait for one to finish.';
   running.add(id);
@@ -160,15 +163,15 @@ async function startRun(id: string, trigger: RunRecord['trigger']): Promise<stri
     if (!header) return 'Set up the vault in the dashboard first: results are only ever stored encrypted.';
     if (entry.needsAttention && trigger === 'schedule') return 'Paused: the site needs attention.';
     started = true;
-    void runRecipe(entry, header, trigger).finally(() => running.delete(id));
+    void runRecipe(entry, header, trigger, runId).finally(() => running.delete(id));
     return undefined;
   } finally {
     if (!started) running.delete(id);
   }
 }
 
-async function runRecipe(entry: RecipeEntry, header: string, trigger: RunRecord['trigger']): Promise<void> {
-  const run: RunRecord = { id: crypto.randomUUID(), recipeId: entry.recipe.id, via: entry.recipe.useNativeHost ? 'host' : 'tab', trigger, startedAt: new Date().toISOString(), status: 'running', warnings: [] };
+async function runRecipe(entry: RecipeEntry, header: string, trigger: RunRecord['trigger'], runId: string): Promise<void> {
+  const run: RunRecord = { id: runId, recipeId: entry.recipe.id, via: entry.recipe.useNativeHost ? 'host' : 'tab', trigger, startedAt: new Date().toISOString(), status: 'running', warnings: [] };
   try {
     await store.putRun(run);
     const core = await loadCore();
@@ -256,4 +259,167 @@ async function handlePick(m: PickMessage, sender: chrome.runtime.MessageSender):
   draft.lastPick = `${picker.mode}: ${m.selector} (${matches} match${matches === 1 ? '' : 'es'})`;
   await store.setDraft(draft);
   return { ok: true };
+}
+
+// ── Claude access: the bridge to the MCP server ─────────────────────────────
+// Only while the person has turned Claude access on. The extension calls out to the
+// native host and keeps that connection open; the host passes on the MCP server's
+// commands (from an owner-only mailbox folder) and their answers. Nothing listens.
+
+let bridgePort: chrome.runtime.Port | undefined;
+let bridgeRetry = 0;
+/** Under the host's 16 MiB limit for messages from the extension. */
+const REPLY_MAX = 15 * 1024 * 1024;
+let bridgeTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function syncBridge() {
+  const { claudeAccess } = await store.getSettings();
+  if (claudeAccess && !bridgePort) openBridge();
+  if (!claudeAccess && bridgePort) {
+    bridgePort.disconnect();
+    bridgePort = undefined;
+  }
+}
+
+function openBridge() {
+  clearTimeout(bridgeTimer);
+  const port = chrome.runtime.connectNative(HOST_NAME);
+  bridgePort = port;
+  const parts = new Map<string, string[]>();
+  port.onMessage.addListener((m: { type: string; id?: string; part?: number; parts?: number; text?: string }) => {
+    if (m.type === 'bridgeReady') { bridgeRetry = 0; return; }
+    if (m.type !== 'bridgeRequest' || typeof m.id !== 'string' || typeof m.text !== 'string' || !Number.isInteger(m.part) || !Number.isInteger(m.parts) || m.parts! > 32) return;
+    const list = parts.get(m.id) ?? new Array<string>(m.parts!).fill('');
+    list[m.part!] = m.text;
+    parts.set(m.id, list);
+    if (m.part! + 1 < m.parts!) return;
+    parts.delete(m.id);
+    const id = m.id;
+    let request: { command?: unknown; args?: unknown; replyKey?: unknown };
+    try { request = JSON.parse(list.join('')); } catch { return; }
+    const fail = (error: unknown) => port.postMessage({ type: 'bridgeReply', id, ok: false, error: String((error as Error)?.message ?? error) });
+    void bridgeCommand(String(request.command), (request.args ?? {}) as Record<string, unknown>).then(async result => {
+      // Sealed to the asking process's one-time key: the mailbox never holds it open.
+      const sealed = (await loadCore()).sealReply(String(request.replyKey), id, JSON.stringify(result ?? null));
+      if (sealed.length > REPLY_MAX) throw new Error('The answer is too large: ask for fewer records (limit), or use export_records.');
+      port.postMessage({ type: 'bridgeReply', id, ok: true, sealed });
+    }).catch(fail);
+  });
+  port.onDisconnect.addListener(() => {
+    if (bridgePort === port) bridgePort = undefined;
+    // Try again while access stays on (e.g. the host was just installed).
+    bridgeTimer = setTimeout(() => void syncBridge(), Math.min(60_000, 1000 * 2 ** bridgeRetry++));
+  });
+  port.postMessage({ type: 'bridge' });
+}
+
+void syncBridge();
+chrome.storage.onChanged.addListener(changes => { if (changes.claudeAccess) void syncBridge(); });
+
+/** Asks an open, unlocked dashboard (the only place records can be opened). */
+async function viaDashboard(command: string, args: Record<string, unknown>): Promise<unknown> {
+  let reply: { ok?: boolean; result?: unknown; error?: string } | undefined;
+  try { reply = await chrome.runtime.sendMessage({ type: 'vaultRequest', command, args }); }
+  catch { throw new Error('Open the Pocket Scraper Secure dashboard and unlock the vault to allow this.'); }
+  if (!reply) throw new Error('Open the Pocket Scraper Secure dashboard and unlock the vault to allow this.');
+  if (!reply.ok) throw new Error(reply.error ?? 'The dashboard refused');
+  return reply.result;
+}
+
+const text = (v: unknown, name: string) => {
+  if (typeof v !== 'string' || !v) throw new Error(`${name} is required`);
+  return v;
+};
+
+async function bridgeCommand(command: string, args: Record<string, unknown>): Promise<unknown> {
+  // Checked per command: the bridge may still be closing when access is turned off.
+  if (!(await store.getSettings()).claudeAccess) throw new Error('Claude access is off.');
+  const core = await loadCore();
+  switch (command) {
+    case 'status': {
+      const header = await store.getVaultHeader();
+      let locked = true;
+      try { locked = !((await viaDashboard('vaultState', {})) as { unlocked: boolean }).unlocked; } catch { /* no dashboard */ }
+      return {
+        connected: true,
+        vault: header ? { exists: true, locked, fingerprint: core.vaultFingerprint(header) } : { exists: false },
+        recipes: Object.keys(await store.getRecipes()).length,
+        runners: (await store.getRunners()).length,
+        nativeHost: await hostStatus().catch(() => ({ installed: false }))
+      };
+    }
+    case 'getSettings': return store.getSettings();
+    case 'updateSettings': {
+      const change = { runTimeoutMs: args.runTimeoutMs, autoLockMinutes: args.autoLockMinutes } as Partial<store.Settings>;
+      // A longer auto-lock keeps records readable longer: only the person can raise it.
+      if (typeof change.autoLockMinutes === 'number' && change.autoLockMinutes > (await store.getSettings()).autoLockMinutes) {
+        throw new Error('Only the person can make the vault stay unlocked longer (dashboard). Claude can only shorten it.');
+      }
+      return store.updateSettings(change);
+    }
+    case 'listRecipes': {
+      const entries = Object.values(await store.getRecipes());
+      return Promise.all(entries.map(async e => ({
+        ...e.recipe,
+        needsAttention: e.needsAttention,
+        siteAllowed: await chrome.permissions.contains({ origins: [new URL(e.recipe.url).origin + '/*'] }),
+        records: await store.countRecords(e.recipe.id),
+        updatedAt: e.updatedAt
+      })));
+    }
+    case 'saveRecipe': {
+      const recipe = await saveRecipe(args.recipe, true);
+      const allowed = await chrome.permissions.contains({ origins: [new URL(recipe.url).origin + '/*'] });
+      return { recipe, siteAllowed: allowed, ...(allowed ? {} : { note: `Before it can run, the person must click Allow access for ${new URL(recipe.url).origin} in the dashboard.` }) };
+    }
+    case 'deleteRecipe': {
+      const id = text(args.id, 'id');
+      if (!(await store.getRecipes())[id]) throw new Error('Unknown recipe');
+      await mutateRecipes(recipes => { delete recipes[id]; });
+      if (args.deleteRecords === true) await store.deleteRecords(id);
+      await syncAlarms();
+      return { deleted: id, recordsDeleted: args.deleteRecords === true };
+    }
+    case 'runRecipe': {
+      const runId = crypto.randomUUID();
+      const problem = await startRun(text(args.id, 'id'), 'manual', runId);
+      if (problem) throw new Error(problem);
+      return { runId };
+    }
+    case 'listRuns': {
+      const limit = Math.min(200, Math.max(1, Number(args.limit) || 50));
+      const runs = await store.listRuns(1000);
+      return runs.filter(r => !args.recipeId || r.recipeId === args.recipeId).slice(0, limit);
+    }
+    case 'readRecords':
+    case 'exportRecords':
+    case 'exportBundle':
+      return viaDashboard(command, args);
+    case 'listRunners': return store.getRunners();
+    case 'enrollRunner': {
+      const key = text(args.key, 'key').trim();
+      const fingerprint = core.keyFingerprint(key);
+      const name = text(args.name, 'name').trim().slice(0, 60);
+      const list = await store.getRunners();
+      if (list.some(r => r.key === key)) throw new Error('That runner is already enrolled.');
+      // A runner's batches become records: the person approves it in the dashboard.
+      const runner: Runner = { name, key, fingerprint, addedAt: new Date().toISOString(), pending: true };
+      await store.setRunners([...list, runner]);
+      return { ...runner, note: 'Waiting for the person to compare the fingerprint and click Approve under Runners in the dashboard.' };
+    }
+    case 'removeRunner': {
+      const which = text(args.runner, 'runner');
+      const list = await store.getRunners();
+      const keep = list.filter(r => r.key !== which && r.name !== which);
+      if (keep.length === list.length) throw new Error('No such runner');
+      await store.setRunners(keep);
+      return { removed: list.length - keep.length };
+    }
+    case 'importBatches': {
+      const files = Array.isArray(args.files) ? (args.files as { name: unknown; text: unknown }[]) : [];
+      return importBatchFiles(core, files.slice(0, 500).map(f => ({ name: String(f.name), size: String(f.text).length, text: async () => String(f.text) })));
+    }
+    default:
+      throw new Error(`Unknown command ${command}`);
+  }
 }

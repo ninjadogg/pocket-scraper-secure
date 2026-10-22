@@ -83,6 +83,14 @@ exist for Linux (x64 and arm64), macOS and Windows.
 Runners never get your passphrase: results are sealed before they touch the runner's
 disk. See [docs/RUNNER.md](docs/RUNNER.md).
 
+## Manage it from Claude
+
+`pocket-scraper-mcp` is an MCP server. Through it, Claude can create and run recipes,
+kick off runner runs, import result files or collect from a bucket, and change bucket,
+timer and extension settings. It works only once you tick **Let Claude manage Pocket
+Scraper Secure** in the dashboard. Records can be read only while the dashboard is
+unlocked, and deletes need your confirmation. See [docs/MCP.md](docs/MCP.md).
+
 ## Layout
 
 | Path | What |

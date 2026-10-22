@@ -81,6 +81,11 @@ impl VaultHeader {
 pub struct SecretKey(StaticSecret);
 
 impl SecretKey {
+    /// A fresh random key (the MCP server's one-time key for sealed answers).
+    pub fn generate() -> SecretKey {
+        SecretKey(StaticSecret::from(random_bytes::<32>()))
+    }
+
     pub fn public_key(&self) -> [u8; 32] {
         PublicKey::from(&self.0).to_bytes()
     }
@@ -231,6 +236,25 @@ fn seal_key(shared: &[u8; 32], ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Ze
     key
 }
 
+/// Bridge answers are sealed to the asking MCP process's one-time key, bound to the
+/// request ID, so the mailbox never holds opened records.
+fn reply_aad(id: &str) -> Vec<u8> {
+    [b"pocket-scraper-secure/bridge-reply/v1\0".as_slice(), id.as_bytes()].concat()
+}
+
+pub fn seal_reply(recipient_b64: &str, id: &str, plaintext: &[u8]) -> Result<String, Error> {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let key: [u8; 32] = engine.decode(recipient_b64.trim()).ok().and_then(|k| k.try_into().ok()).ok_or_else(|| Error::invalid("The reply key is malformed"))?;
+    Ok(engine.encode(seal(&key, &reply_aad(id), plaintext)?))
+}
+
+pub fn open_reply(secret: &SecretKey, id: &str, sealed_b64: &str) -> Result<Vec<u8>, Error> {
+    use base64::Engine;
+    let sealed = base64::engine::general_purpose::STANDARD.decode(sealed_b64).map_err(|_| Error::invalid("The sealed answer is malformed"))?;
+    open(secret, &reply_aad(id), &sealed)
+}
+
 /// Associated data for a sealed record.
 pub fn record_aad(recipe_id: &str, record_key: &str) -> Vec<u8> {
     [recipe_id.as_bytes(), &[0], record_key.as_bytes()].concat()
@@ -253,6 +277,18 @@ pub(crate) mod b64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_open_only_with_the_one_time_key_and_id() {
+        use base64::Engine;
+        let key = SecretKey::generate();
+        let public = base64::engine::general_purpose::STANDARD.encode(key.public_key());
+        let sealed = seal_reply(&public, "123-ab", b"{\"records\":[]}").unwrap();
+        assert_eq!(open_reply(&key, "123-ab", &sealed).unwrap(), b"{\"records\":[]}");
+        assert!(open_reply(&key, "123-ac", &sealed).is_err(), "bound to the request ID");
+        assert!(open_reply(&SecretKey::generate(), "123-ab", &sealed).is_err());
+        assert!(seal_reply("not a key", "x", b"").is_err());
+    }
 
     const PASS: &str = "correct horse battery";
 

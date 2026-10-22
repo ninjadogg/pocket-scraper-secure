@@ -176,6 +176,12 @@ pub fn vault_fingerprint(header_json: &str) -> Result<String, JsError> {
     Ok(if h.signing_key.is_empty() { String::new() } else { bundle::fingerprint(&h.signing_key) })
 }
 
+/// Seals an answer for the MCP server to the one-time key in its request.
+#[wasm_bindgen(js_name = sealReply)]
+pub fn seal_reply(recipient_b64: &str, id: &str, plaintext: &str) -> Result<String, JsError> {
+    vault::seal_reply(recipient_b64, id, plaintext.as_bytes()).map_err(js)
+}
+
 /// Fingerprint of a runner's public key (base64), as the runner prints it.
 #[wasm_bindgen(js_name = keyFingerprint)]
 pub fn key_fingerprint(key_b64: &str) -> Result<String, JsError> {
