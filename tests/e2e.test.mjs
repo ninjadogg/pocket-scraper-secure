@@ -4,7 +4,8 @@
 // Skips when no Chrome for Testing is found (PSS_E2E_BROWSER overrides the path).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
@@ -172,6 +173,43 @@ test('the extension collects, seals, shows and protects records end to end', { t
     // Opening the records removed the second run's repeat copies.
     assert.match(await dash.evaluate(`document.querySelector('#records').innerText`), /6 record\(s\); 6 repeat copies from later runs removed/);
     assert.equal((await dash.evaluate(records)).length, 6);
+
+    // Teach once, run anywhere: export a signed bundle, run it in the runner binary,
+    // enrol the runner and import its signed, sealed batch.
+    const downloads = join(work, 'downloads');
+    mkdirSync(downloads);
+    await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+    const fingerprint = await waitFor(`document.querySelector('#vault code')?.textContent`, 'the vault fingerprint');
+    await dash.evaluate(`[...document.querySelectorAll('#recipes button')].find(b => b.textContent === 'Export for runner').click()`);
+    const bundleFile = join(downloads, 'List.pssbundle');
+    for (let i = 0; i < 50 && !existsSync(bundleFile); i++) await sleep(100);
+    const runnerEnv = { ...process.env, PSS_DATA_DIR: join(work, 'runner-data'), PSS_BROWSER_PATH: browserPath };
+    // Asynchronous: the test site is served from this process, so it must keep running.
+    const runner = async (...args) => (await promisify(execFile)(join(root, 'target', 'debug', 'pocket-scraper-runner'), args, { env: runnerEnv, encoding: 'utf8' })).stdout;
+    const runnerKey = (await runner('id')).match(/key:\s+(\S+)/)[1];
+    assert.match(await runner('add', bundleFile, '--trust', fingerprint), /Added "List"/);
+    assert.match(await runner('run', saved.id), /Success: 6 rows/);
+    const batchFile = readdirSync(join(work, 'runner-data', 'runner', 'outbox')).map(f => join(work, 'runner-data', 'runner', 'outbox', f))[0];
+    const tamperedFile = join(work, 'tampered.pssbatch');
+    writeFileSync(tamperedFile, readFileSync(batchFile, 'utf8').replace(/"signature": "./, '"signature": "A'));
+    const { root: { nodeId: docId } } = await call('DOM.getDocument', {}, dash.sessionId);
+    const { nodeId: inputId } = await call('DOM.querySelector', { nodeId: docId, selector: '#importBatches' }, dash.sessionId);
+    const importFiles = async files => {
+      await dash.evaluate(`document.querySelector('#importMessage').textContent = ''`);
+      await call('DOM.setFileInputFiles', { nodeId: inputId, files }, dash.sessionId);
+      return waitFor(`document.querySelector('#importMessage').textContent`, 'the import result');
+    };
+    assert.match(await importFiles([batchFile]), /refused \(The batch comes from a runner that isn't enrolled\)/);
+    await dash.evaluate(`(() => { const [name, key] = document.querySelectorAll('#runners input'); name.value = 'test-runner'; key.value = ${JSON.stringify(runnerKey)}; key.dispatchEvent(new Event('input')); [...document.querySelectorAll('#runners button')].find(b => b.textContent === 'Add runner').click(); })()`);
+    await waitFor(`[...document.querySelectorAll('#runners span')].some(s => s.textContent === 'test-runner')`, 'the enrolled runner');
+    assert.match(await importFiles([batchFile]), /success, 6 rows from test-runner/);
+    assert.match(await importFiles([batchFile, tamperedFile]), /already imported.*tampered\.pssbatch: refused/);
+    const runnerRun = await waitFor(`${runs}.then(rs => rs.find(r => r.via === 'runner'))`, 'the imported run');
+    assert.equal(runnerRun.runner, 'test-runner');
+    // Same rows as the tab runs: the open records view refreshes after the import and
+    // removes the repeat copies, leaving the 6 distinct records.
+    await waitFor(`${records}.then(r => r.length === 6)`, 'compacted records');
+    assert.match(await dash.evaluate(`document.querySelector('#records p.small').textContent`), /^6 record\(s\)/);
 
     // The picker ignores synthetic clicks and accepts a real one.
     const page = await open(`${base}/list`);

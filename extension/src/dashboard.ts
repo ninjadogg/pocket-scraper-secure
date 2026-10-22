@@ -5,7 +5,7 @@ import type { UnlockedVault } from '../build/core/pocket_scraper_core_wasm.js';
 import { loadCore, type Core } from './core.js';
 import { $, download, h, send } from './dom.js';
 import * as store from './store.js';
-import type { PlainRecord, RecipeEntry, RunRecord } from './types.js';
+import type { Batch, PlainRecord, RecipeEntry, Runner, RunRecord } from './types.js';
 
 let core: Core;
 let vault: UnlockedVault | null = null;
@@ -24,6 +24,13 @@ function lock() {
   clearTimeout(lockTimer);
   $('records').replaceChildren(h('p', { className: 'small' }, 'Unlock the vault to read records.'));
   void renderVault();
+  void renderRecipes();
+}
+
+/** The fingerprint runners pin (shown with `pocket-scraper-runner add`). */
+function fingerprintLine(header: string): HTMLElement[] {
+  const fp = core.vaultFingerprint(header);
+  return fp ? [h('p', { className: 'small' }, 'Vault fingerprint: ', h('code', {}, fp))] : [];
 }
 
 async function touch() {
@@ -60,8 +67,12 @@ async function renderVault() {
       try {
         say('Unlocking…');
         // Always the stored header: it may have changed since this form was drawn.
-        vault = core.UnlockedVault.unlock((await store.getVaultHeader()) ?? header, pass.value);
+        const current = (await store.getVaultHeader()) ?? header;
+        vault = core.UnlockedVault.unlock(current, pass.value);
         pass.value = '';
+        // Vaults made before runners existed get their signing key recorded now.
+        if (!core.vaultFingerprint(current)) await store.setVaultHeader(vault.completeHeader(current));
+        void renderRecipes();
         say('');
         await touch();
         await renderVault();
@@ -69,13 +80,14 @@ async function renderVault() {
       } catch (e) { say((e as Error).message, true); }
     };
     pass.addEventListener('keydown', e => { if (e.key === 'Enter') void unlock(); });
-    box.replaceChildren(h('strong', {}, 'Vault locked'), h('div', { className: 'row' }, pass, h('button', { className: 'primary tight', onclick: unlock }, 'Unlock')));
+    box.replaceChildren(h('strong', {}, 'Vault locked'), ...fingerprintLine(header), h('div', { className: 'row' }, pass, h('button', { className: 'primary tight', onclick: unlock }, 'Unlock')));
     return;
   }
   const oldPass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Current passphrase' });
   const newPass = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'New passphrase' });
   box.replaceChildren(
     h('div', { className: 'row' }, h('strong', {}, 'Vault unlocked'), h('button', { className: 'tight', onclick: lock }, 'Lock now')),
+    ...fingerprintLine((await store.getVaultHeader()) ?? header),
     h('details', {}, h('summary', {}, 'Change passphrase'), h('div', { className: 'row' }, oldPass, newPass, h('button', { className: 'tight', onclick: async () => {
       try {
         const current = await store.getVaultHeader();
@@ -103,6 +115,15 @@ function recipeRow(entry: RecipeEntry, records: number, hostInstalled: boolean):
   const actions = h('div', { className: 'actions' },
     act('Run now', async () => { await send({ type: 'runNow', id: r.id }); say(`Running ${r.name}…`); }),
     act('Records', () => showRecords(r.id)));
+  if (vault) {
+    actions.append(act('Export for runner', async () => {
+      const { runTimeoutMs } = await store.getSettings();
+      const header = await store.getVaultHeader();
+      const file = `${r.name.replace(/[^\w.-]+/g, '_').slice(0, 60) || 'recipe'}.pssbundle`;
+      download(file, 'application/json', vault!.exportBundle(JSON.stringify(r), new Date().toISOString(), runTimeoutMs));
+      say(`Exported ${file}. On the runner: pocket-scraper-runner add ${file} --trust ${header ? core.vaultFingerprint(header) : ''}`);
+    }));
+  }
   if (entry.needsAttention) {
     if (r.useNativeHost && hostInstalled) {
       actions.append(act('Open session', async () => { await send({ type: 'session', id: r.id, action: 'open' }); say('Sign in or complete verification in the window that opened, then click Finish session.'); }),
@@ -171,6 +192,70 @@ async function showRecords(recipeId: string) {
       ...shown.map(r => h('tr', {}, h('td', {}, new Date(r.observedAt).toLocaleString()), ...names.map(n => h('td', {}, r.fields[n] ?? '')), h('td', {}, r.pageUrl))))));
 }
 
+async function renderRunners() {
+  const runners = await store.getRunners();
+  const name = h('input', { placeholder: 'Name, e.g. build-server' });
+  const key = h('input', { placeholder: 'Runner key (from pocket-scraper-runner init)' });
+  const shown = h('p', { className: 'small' });
+  key.addEventListener('input', () => {
+    try { shown.textContent = `Fingerprint ${core.keyFingerprint(key.value)}: check it matches what the runner printed.`; }
+    catch { shown.textContent = ''; }
+  });
+  $('runners').replaceChildren(
+    ...runners.map(r => h('div', { className: 'row' },
+      h('span', {}, r.name), h('code', { className: 'small' }, r.fingerprint),
+      h('button', { className: 'tight', onclick: async () => {
+        if (!confirm(`Remove runner “${r.name}”? Its future results will be refused.`)) return;
+        await store.setRunners((await store.getRunners()).filter(x => x.key !== r.key));
+        await renderRunners();
+      } }, 'Remove'))),
+    h('div', { className: 'row' }, name, key, h('button', { className: 'tight', onclick: async () => {
+      try {
+        const fingerprint = core.keyFingerprint(key.value);
+        if (!name.value.trim()) throw new Error('Give the runner a name.');
+        const list = await store.getRunners();
+        if (list.some(x => x.key === key.value.trim())) throw new Error('That runner is already enrolled.');
+        list.push({ name: name.value.trim().slice(0, 60), key: key.value.trim(), fingerprint, addedAt: new Date().toISOString() });
+        await store.setRunners(list);
+        say(`Enrolled ${name.value.trim()} (${fingerprint}).`);
+        await renderRunners();
+      } catch (e) { say((e as Error).message, true); }
+    } }, 'Add runner')),
+    shown);
+}
+
+/** Imports result batch files: signed by an enrolled runner, sealed to this vault,
+ * each at most once. Works while the vault is locked (records stay sealed). */
+async function importBatches(files: FileList) {
+  const header = await store.getVaultHeader();
+  if (!header) return say('Create the vault first.', true);
+  const runners = await store.getRunners();
+  const recipes = await store.getRecipes();
+  const lines: string[] = [];
+  for (const file of [...files]) {
+    try {
+      if (file.size > 8 * 1024 * 1024) throw new Error('larger than 8 MB');
+      const batch = JSON.parse(core.openBatch(await file.text(), JSON.stringify(runners.map(r => r.key)), header)) as Batch;
+      const runner = runners.find(r => r.key === batch.runnerKey)!;
+      if (!recipes[batch.recipeId]) throw new Error('its recipe no longer exists here');
+      if (!(await store.claimBatch(batch.batchId))) { lines.push(`${file.name}: already imported`); continue; }
+      await store.addRecords(batch.recipeId, batch.runId, batch.records);
+      await store.putRun({
+        id: batch.runId, recipeId: batch.recipeId, via: 'runner', runner: runner.name, trigger: 'schedule',
+        startedAt: batch.startedAt, finishedAt: batch.finishedAt, status: batch.status, rowCount: batch.rowCount,
+        warnings: batch.warnings, ...(batch.error ? { error: batch.error } : {})
+      });
+      lines.push(`${file.name}: ${batch.status.replace('_', ' ')}, ${batch.rowCount} rows from ${runner.name}`);
+    } catch (e) {
+      lines.push(`${file.name}: refused (${(e as Error).message})`);
+    }
+  }
+  $('importMessage').textContent = lines.join(' · ');
+  await renderRecipes();
+  await renderRuns();
+  if (selected && vault) await showRecords(selected);
+}
+
 async function renderRuns() {
   const recipes = await store.getRecipes();
   const runs: RunRecord[] = await store.listRuns(50);
@@ -179,7 +264,7 @@ async function renderRuns() {
     ...runs.map(run => h('tr', {},
       h('td', {}, new Date(run.startedAt).toLocaleString()),
       h('td', {}, recipes[run.recipeId]?.recipe.name ?? '(deleted)'),
-      h('td', {}, `${run.via === 'host' ? 'Native host' : 'Tab'}, ${run.trigger}`),
+      h('td', {}, `${run.via === 'host' ? 'Native host' : run.via === 'runner' ? `Runner ${run.runner ?? ''}` : 'Tab'}, ${run.trigger}`),
       h('td', { className: `status-${run.status}` }, run.status.replace('_', ' ')),
       h('td', {}, run.rowCount ?? ''),
       h('td', {}, run.error ?? '', ...run.warnings.slice(0, 5).map(w => h('div', { className: 'small' }, w)), run.warnings.length > 5 ? h('div', { className: 'small' }, `…${run.warnings.length - 5} more`) : null))));
@@ -191,7 +276,10 @@ async function renderRuns() {
   window.addEventListener('pagehide', () => vault?.free());
   await renderVault();
   await renderRecipes();
+  await renderRunners();
   await renderRuns();
+  const picker = $('importBatches') as HTMLInputElement;
+  picker.addEventListener('change', () => { if (picker.files?.length) void importBatches(picker.files).finally(() => { picker.value = ''; }); });
   chrome.storage.onChanged.addListener(changes => {
     if (changes.recipes) void renderRecipes();
     if (changes.vault && !vault) void renderVault();

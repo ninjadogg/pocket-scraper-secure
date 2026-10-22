@@ -1,7 +1,7 @@
 // Local persistence. Records are stored sealed; nothing here ever sees plaintext.
 // Everything read back is re-validated by its consumer, because storage is not
 // trusted (another process could have edited the profile on disk).
-import type { Draft, RecipeEntry, RunRecord, SealedRecord, StoredRecord } from './types.js';
+import type { Draft, RecipeEntry, Runner, RunRecord, SealedRecord, StoredRecord } from './types.js';
 
 const DB_NAME = 'pocket-scraper-secure';
 const RUNS_KEPT = 1000;
@@ -9,11 +9,15 @@ const RUNS_KEPT = 1000;
 let dbPromise: Promise<IDBDatabase> | undefined;
 function db(): Promise<IDBDatabase> {
   dbPromise ??= new Promise((resolve, reject) => {
-    const open = indexedDB.open(DB_NAME, 1);
-    open.onupgradeneeded = () => {
+    const open = indexedDB.open(DB_NAME, 2);
+    open.onupgradeneeded = event => {
       const d = open.result;
-      d.createObjectStore('records', { keyPath: ['recipeId', 'key'] }).createIndex('recipeId', 'recipeId');
-      d.createObjectStore('runs', { keyPath: 'id' }).createIndex('startedAt', 'startedAt');
+      if (event.oldVersion < 1) {
+        d.createObjectStore('records', { keyPath: ['recipeId', 'key'] }).createIndex('recipeId', 'recipeId');
+        d.createObjectStore('runs', { keyPath: 'id' }).createIndex('startedAt', 'startedAt');
+      }
+      // Result batches already imported from runners (by batch ID), so none is stored twice.
+      if (event.oldVersion < 2) d.createObjectStore('batches', { keyPath: 'batchId' });
     };
     open.onsuccess = () => resolve(open.result);
     open.onerror = () => reject(open.error);
@@ -113,7 +117,17 @@ export async function closeStaleRuns(): Promise<void> {
   await done(tx);
 }
 
-// chrome.storage.local: vault header (wrapped key), recipes, draft, settings.
+/** Records a batch as imported; false if it already was. */
+export async function claimBatch(batchId: string): Promise<boolean> {
+  const tx = (await db()).transaction('batches', 'readwrite');
+  const store = tx.objectStore('batches');
+  const seen = (await result(store.getKey(batchId))) !== undefined;
+  if (!seen) store.add({ batchId, importedAt: new Date().toISOString() });
+  await done(tx);
+  return !seen;
+}
+
+// chrome.storage.local: vault header (wrapped key), recipes, runners, draft, settings.
 
 export async function getVaultHeader(): Promise<string | undefined> {
   const { vault } = await chrome.storage.local.get('vault');
@@ -129,6 +143,14 @@ export async function getRecipes(): Promise<Record<string, RecipeEntry>> {
 }
 export async function setRecipes(recipes: Record<string, RecipeEntry>): Promise<void> {
   await chrome.storage.local.set({ recipes });
+}
+
+export async function getRunners(): Promise<Runner[]> {
+  const { runners } = await chrome.storage.local.get('runners');
+  return Array.isArray(runners) ? (runners as Runner[]) : [];
+}
+export async function setRunners(runners: Runner[]): Promise<void> {
+  await chrome.storage.local.set({ runners });
 }
 
 export function emptyDraft(): Draft {

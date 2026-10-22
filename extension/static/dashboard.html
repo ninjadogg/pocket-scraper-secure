@@ -16,6 +16,12 @@
   <h2>Recipes</h2>
   <div class="scroll"><table id="recipes"></table></div>
 
+  <h2>Runners</h2>
+  <p class="small">Runners run recipes on their own schedule: on a VM, a server or this computer, with no browser window. They receive only recipes signed by this vault and its public key; results come back sealed and signed.</p>
+  <div id="runners"></div>
+  <div class="row"><label class="tight" for="importBatches">Import results</label><input id="importBatches" type="file" multiple accept=".pssbatch"></div>
+  <div id="importMessage" class="message" role="status"></div>
+
   <h2 id="recordsTitle">Records</h2>
   <div id="records"></div>
 

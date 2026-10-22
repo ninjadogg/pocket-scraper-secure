@@ -43,7 +43,9 @@ export type RunStatus = 'running' | 'success' | 'error' | 'needs_attention';
 export interface RunRecord {
   id: string;
   recipeId: string;
-  via: 'tab' | 'host';
+  via: 'tab' | 'host' | 'runner';
+  /** For runner batches: the enrolled runner's name. */
+  runner?: string;
   trigger: 'manual' | 'schedule';
   startedAt: string;
   finishedAt?: string;
@@ -54,6 +56,14 @@ export interface RunRecord {
 }
 
 export interface SealedRecord { key: string; sealed: string }
+/** A runner enrolled to send result batches (its Ed25519 public key, base64). */
+export interface Runner { name: string; key: string; fingerprint: string; addedAt: string }
+/** core::bundle::Batch as JSON. */
+export interface Batch {
+  batchId: string; runnerKey: string; vaultPublicKey: string; recipeId: string; runId: string;
+  startedAt: string; finishedAt: string; status: 'success' | 'error' | 'needs_attention';
+  rowCount: number; warnings: string[]; error?: string | null; records: SealedRecord[];
+}
 /** Stored as-is: a random key and ciphertext. When it was observed is inside the ciphertext. */
 export interface StoredRecord extends SealedRecord { recipeId: string; runId: string }
 export interface PlainRecord { observedAt: string; runId: string; pageUrl: string; fields: Record<string, string> }
