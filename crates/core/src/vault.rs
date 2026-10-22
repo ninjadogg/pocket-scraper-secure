@@ -23,6 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 const SEAL_V1: u8 = 1;
 const WRAP_INFO: &[u8] = b"pocket-scraper-secure/vault-wrap/v1";
 const SEAL_INFO: &[u8] = b"pocket-scraper-secure/seal/v1";
+const SIGNING_INFO: &[u8] = b"pocket-scraper-secure/vault-signing/v1";
 const SEAL_OVERHEAD: usize = 1 + 32 + 24 + 16;
 
 /// Argon2id cost. The defaults meet OWASP's minimum (19 MiB, 2 passes, 1 lane).
@@ -64,6 +65,10 @@ pub struct VaultHeader {
     /// nonce (24) ‖ XChaCha20-Poly1305(secret key)
     #[serde(with = "b64")]
     pub wrapped_secret: Vec<u8>,
+    /// Ed25519 public key for recipe bundles, derived from the secret key. Empty in
+    /// headers written before bundles existed; filled in at the next unlock.
+    #[serde(default, with = "b64")]
+    pub signing_key: Vec<u8>,
 }
 
 impl VaultHeader {
@@ -78,6 +83,21 @@ pub struct SecretKey(StaticSecret);
 impl SecretKey {
     pub fn public_key(&self) -> [u8; 32] {
         PublicKey::from(&self.0).to_bytes()
+    }
+
+    /// The vault's Ed25519 key for signing recipe bundles, derived from the secret
+    /// key, so it exists only while the vault is unlocked.
+    pub fn signing_key(&self) -> ed25519_dalek::SigningKey {
+        let secret = Zeroizing::new(self.0.to_bytes());
+        let mut seed = Zeroizing::new([0u8; 32]);
+        Hkdf::<Sha256>::new(None, secret.as_slice()).expand(SIGNING_INFO, seed.as_mut_slice()).expect("32 bytes is a valid HKDF length");
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+    }
+
+    /// The header with its signing public key filled in (headers made before bundles
+    /// existed don't have it).
+    pub fn complete_header(&self, header: &VaultHeader) -> VaultHeader {
+        VaultHeader { signing_key: self.signing_key().verifying_key().to_bytes().to_vec(), ..header.clone() }
     }
 }
 
@@ -121,7 +141,8 @@ fn wrap(secret: &SecretKey, passphrase: &str, kdf: KdfParams) -> Result<VaultHea
     secret_bytes.zeroize();
     let mut wrapped_secret = nonce.to_vec();
     wrapped_secret.extend_from_slice(&ct);
-    Ok(VaultHeader { version: 1, public_key, kdf, kdf_salt, wrapped_secret })
+    let signing_key = secret.signing_key().verifying_key().to_bytes().to_vec();
+    Ok(VaultHeader { version: 1, public_key, kdf, kdf_salt, wrapped_secret, signing_key })
 }
 
 /// Unlocks the vault. A wrong passphrase and a tampered header look the same.
@@ -142,6 +163,9 @@ pub fn unlock(header: &VaultHeader, passphrase: &str) -> Result<SecretKey, Error
     let secret = SecretKey(StaticSecret::from(*bytes));
     if secret.public_key().as_slice() != header.public_key.as_slice() {
         return Err(Error::Crypto("Vault key does not match its public key"));
+    }
+    if !header.signing_key.is_empty() && header.signing_key.as_slice() != secret.signing_key().verifying_key().as_bytes().as_slice() {
+        return Err(Error::Crypto("Vault signing key does not match: the vault was modified"));
     }
     Ok(secret)
 }

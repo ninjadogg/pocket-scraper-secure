@@ -3,6 +3,7 @@
 //! Passphrases are taken by value and wiped from WebAssembly memory after use (the
 //! page's own JavaScript strings can't be wiped).
 
+use pocket_scraper_core::bundle;
 use pocket_scraper_core::plan::{Action, Observation, Run, RunOptions};
 use pocket_scraper_core::protocol::{seal_rows as seal, SealedRecord};
 use pocket_scraper_core::recipe::Recipe;
@@ -130,6 +131,19 @@ impl UnlockedVault {
         Ok(UnlockedVault { secret: result? })
     }
 
+    /// Signs a recipe bundle for runners. `recipe_json` is a saved recipe.
+    #[wasm_bindgen(js_name = exportBundle)]
+    pub fn export_bundle(&self, recipe_json: &str, created_at: &str, run_timeout_ms: f64) -> Result<String, JsError> {
+        let recipe = Recipe::from_json(recipe_json).map_err(js)?;
+        bundle::sign_bundle(&self.secret, &recipe, created_at, run_timeout_ms as u64).map_err(js)
+    }
+
+    /// The header with its signing key filled in (headers from before bundles lack it).
+    #[wasm_bindgen(js_name = completeHeader)]
+    pub fn complete_header(&self, header_json: &str) -> Result<String, JsError> {
+        Ok(serde_json::to_string(&self.secret.complete_header(&header(header_json)?)).expect("header serialises"))
+    }
+
     /// Opens one sealed record (base64); returns its plaintext JSON.
     pub fn open(&self, recipe_id: &str, key: &str, sealed_b64: &str) -> Result<String, JsError> {
         let sealed: SealedRecord = serde_json::from_value(serde_json::json!({ "key": key, "sealed": sealed_b64 })).map_err(|_| js("Record is malformed"))?;
@@ -153,6 +167,35 @@ pub fn to_csv(field_order_json: &str, records_json: &str) -> Result<String, JsEr
     let order: Vec<String> = serde_json::from_str(field_order_json).map_err(|e| js(format!("Field order is malformed: {e}")))?;
     let records: Vec<PlainRecord> = serde_json::from_str(records_json).map_err(|e| js(format!("Records are malformed: {e}")))?;
     Ok(csv::to_csv(&order, &records))
+}
+
+/// Fingerprint of the vault's signing key, which runners pin; empty for old headers.
+#[wasm_bindgen(js_name = vaultFingerprint)]
+pub fn vault_fingerprint(header_json: &str) -> Result<String, JsError> {
+    let h = header(header_json)?;
+    Ok(if h.signing_key.is_empty() { String::new() } else { bundle::fingerprint(&h.signing_key) })
+}
+
+/// Fingerprint of a runner's public key (base64), as the runner prints it.
+#[wasm_bindgen(js_name = keyFingerprint)]
+pub fn key_fingerprint(key_b64: &str) -> Result<String, JsError> {
+    Ok(bundle::fingerprint(&runner_key(key_b64)?))
+}
+
+fn runner_key(key_b64: &str) -> Result<[u8; 32], JsError> {
+    let v: serde_json::Value = serde_json::json!({ "key": "0".repeat(64), "sealed": key_b64.trim() });
+    let r: SealedRecord = serde_json::from_value(v).map_err(|_| js("A runner key is base64"))?;
+    r.sealed.as_slice().try_into().map_err(|_| js("A runner key is 32 bytes"))
+}
+
+/// Verifies a result batch file against the enrolled runners (JSON array of base64
+/// keys) and this vault; returns the batch as JSON (records base64).
+#[wasm_bindgen(js_name = openBatch)]
+pub fn open_batch(json: &str, enrolled_json: &str, header_json: &str) -> Result<String, JsError> {
+    let keys: Vec<String> = serde_json::from_str(enrolled_json).map_err(|e| js(format!("Runner list is malformed: {e}")))?;
+    let enrolled = keys.iter().map(|k| runner_key(k)).collect::<Result<Vec<_>, _>>()?;
+    let batch = bundle::open_batch(json, &enrolled, &header(header_json)?.public_key().map_err(js)?).map_err(js)?;
+    Ok(serde_json::to_string(&batch).expect("batch serialises"))
 }
 
 #[wasm_bindgen(js_name = minPassphraseChars)]

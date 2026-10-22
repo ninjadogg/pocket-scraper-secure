@@ -2,6 +2,7 @@
 //! does I/O. Compiled to WebAssembly for the extension and natively for the host, so
 //! both run the same tested code.
 
+pub mod bundle;
 pub mod csv;
 pub mod error;
 pub mod limits;
