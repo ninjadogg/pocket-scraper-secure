@@ -1,9 +1,18 @@
 [package]
 name = "pocket-scraper-host"
+description = "Native messaging host: runs recipes in a private headless browser over a pipe."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
+# Not the workspace lints: handing Chrome its debugging pipe needs one dup2 in
+# pre_exec. unsafe is denied everywhere else in this crate.
+[lints.rust]
+unsafe_code = "deny"
+
 [dependencies]
 pocket-scraper-core = { path = "../core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+libc = "=0.2.190"

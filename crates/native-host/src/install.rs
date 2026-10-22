@@ -1,0 +1,116 @@
+//! `install` / `uninstall`: copy the host to a stable private location and register
+//! it with the browsers, allowing only the Pocket Scraper Secure extension.
+
+use crate::browser::private_dir;
+use crate::paths::{self, HOST_NAME};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+/// The extension's ID, fixed by the public key in its manifest.
+pub const DEFAULT_EXTENSION_ID: &str = include_str!("../../../extension/extension-id.txt");
+
+pub fn allowed_extension_id() -> String {
+    fs::read_to_string(paths::allowed_id_file()).ok().map(|s| s.trim().to_string()).filter(|s| valid_id(s)).unwrap_or_else(|| DEFAULT_EXTENSION_ID.trim().to_string())
+}
+
+fn valid_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
+}
+
+struct Options {
+    browsers: Vec<String>,
+    extension_id: String,
+    purge_profiles: bool,
+}
+
+fn parse(args: &[String]) -> Result<Options, String> {
+    let mut o = Options { browsers: vec![], extension_id: DEFAULT_EXTENSION_ID.trim().to_string(), purge_profiles: false };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--browser" => o.browsers.push(it.next().ok_or("--browser needs chrome, chromium, brave or edge")?.clone()),
+            "--extension-id" => o.extension_id = it.next().ok_or("--extension-id needs an ID")?.clone(),
+            "--purge-profiles" => o.purge_profiles = true,
+            other => return Err(format!("Unknown option {other}")),
+        }
+    }
+    if o.browsers.is_empty() {
+        o.browsers.push("chrome".into());
+    }
+    if !valid_id(&o.extension_id) {
+        return Err("An extension ID is 32 letters a–p (see chrome://extensions)".into());
+    }
+    for b in &o.browsers {
+        if paths::manifest_dir(b).is_none() {
+            return Err(format!("Unknown browser {b}: use chrome, chromium, brave or edge"));
+        }
+    }
+    Ok(o)
+}
+
+/// Writes `content` to `path` via a temporary file, refusing to follow a symlink.
+fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<(), String> {
+    if fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return Err(format!("Refusing to replace symlink {}", path.display()));
+    }
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    fs::write(&tmp, content).and_then(|_| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))).and_then(|_| fs::rename(&tmp, path)).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Could not write {}: {e}", path.display())
+    })
+}
+
+pub fn install(args: &[String]) -> Result<(), String> {
+    let o = parse(args)?;
+    let bin = paths::installed_binary();
+    private_dir(bin.parent().expect("bin dir")).map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let bytes = fs::read(&exe).map_err(|e| format!("Could not read {}: {e}", exe.display()))?;
+    write_file(&bin, &bytes, 0o700)?;
+    write_file(&paths::allowed_id_file(), format!("{}\n", o.extension_id).as_bytes(), 0o600)?;
+    let manifest = serde_json::json!({
+        "name": HOST_NAME,
+        "description": "Pocket Scraper Secure native host",
+        "path": bin,
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{}/", o.extension_id)]
+    });
+    let manifest = serde_json::to_vec_pretty(&manifest).expect("manifest serialises");
+    for browser in &o.browsers {
+        let dir = paths::manifest_dir(browser).expect("checked");
+        if !dir.parent().is_some_and(Path::exists) {
+            eprintln!("Skipped {browser}: it doesn't look installed ({} is missing).", dir.parent().unwrap().display());
+            continue;
+        }
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{HOST_NAME}.json"));
+        write_file(&path, &manifest, 0o644)?;
+        eprintln!("Registered with {browser}: {}", path.display());
+    }
+    eprintln!("Installed {} (allowed extension {}).", bin.display(), o.extension_id);
+    Ok(())
+}
+
+pub fn uninstall(args: &[String]) -> Result<(), String> {
+    let o = parse(args)?;
+    for browser in ["chrome", "chromium", "brave", "edge"] {
+        let path = paths::manifest_dir(browser).expect("known").join(format!("{HOST_NAME}.json"));
+        if fs::symlink_metadata(&path).is_ok() {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+            eprintln!("Unregistered from {browser}.");
+        }
+    }
+    let _ = fs::remove_file(paths::installed_binary());
+    let _ = fs::remove_file(paths::allowed_id_file());
+    if o.purge_profiles {
+        let profiles = paths::data_dir().join("profiles");
+        if profiles.exists() {
+            fs::remove_dir_all(&profiles).map_err(|e| e.to_string())?;
+            eprintln!("Deleted saved website sessions in {}.", profiles.display());
+        }
+    } else {
+        eprintln!("Saved website sessions were kept; pass --purge-profiles to delete them.");
+    }
+    Ok(())
+}
