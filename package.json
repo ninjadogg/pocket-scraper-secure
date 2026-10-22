@@ -1,0 +1,21 @@
+{
+  "name": "pocket-scraper-secure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visual selector scraping with a memory-safe Rust/WASM core, encrypted storage and no network listener.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p extension",
+    "test": "cargo test --workspace && npm run build && npm run typecheck && node --test --test-concurrency=1 tests/"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.4",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}

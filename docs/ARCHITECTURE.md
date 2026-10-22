@@ -1,0 +1,137 @@
+# Architecture
+
+Pocket Scraper Secure is a rebuild of [Pocket Scraper](https://github.com/ninjadogg/pocket-scraper)
+around a smaller attack surface:
+
+- **No network listener.** There is no localhost HTTP API, connection token or CORS
+  pairing. The extension talks to an optional native host over Chrome native
+  messaging (stdio), and the native host talks to its headless browser over a pipe
+  (`--remote-debugging-pipe`), never a debugging port.
+- **Memory-safe core.** Validation, record handling, pagination decisions and all
+  cryptography live in one Rust crate. It is compiled to WebAssembly for the
+  extension and natively for the host, so both sides run the same tested code.
+- **Encrypted at rest.** Scraped records are sealed to a public key as they are
+  collected. Reading them needs the vault passphrase.
+
+```
+┌────────────────────────────── Chrome ──────────────────────────────┐
+│                                                                    │
+│  Extension (TypeScript, MV3, strict CSP)                           │
+│  ┌─────────────┐   ┌──────────────────────┐   ┌─────────────────┐  │
+│  │ picker      │──▶│ service worker       │◀──│ popup/dashboard │  │
+│  │ (closed     │   │ • message router     │   │ • unlock vault  │  │
+│  │ shadow DOM) │   │ • tab runner driver  │   │ • view/export   │  │
+│  └─────────────┘   │ • alarms scheduler   │   └────────┬────────┘  │
+│  ┌─────────────┐   └──────────┬───────────┘            │           │
+│  │ extractor   │◀── scripting ┤                        │           │
+│  │ (isolated   │              │ core.wasm              │ core.wasm │
+│  │ world)      │              ▼ (seal, validate, plan) ▼ (open)    │
+│  └─────────────┘   ┌──────────────────────┐                        │
+│                    │ IndexedDB: sealed    │                        │
+│                    │ records only         │                        │
+│                    └──────────────────────┘                        │
+└──────────────┬─────────────────────────────────────────────────────┘
+               │ native messaging (stdio, length-prefixed JSON,
+               │ allowed_origins = this extension's ID only)
+               ▼
+┌──────────────────────────────────────┐   pipe (fd 3/4)   ┌──────────────────┐
+│ native host (Rust)                   │──────────────────▶│ headless Chrome  │
+│ • same core crate (plan, seal)       │   CDP, no port    │ per-site profile │
+│ • returns sealed records only        │                   │ (0700)           │
+└──────────────────────────────────────┘                   └──────────────────┘
+```
+
+## Components
+
+| Path | Language | Role |
+|---|---|---|
+| `crates/core` | Rust | Recipe validation, record canonicalisation and keys, CSV/JSON export, the run planner (state machine), the vault (sealing and opening), and protocol message validation. No I/O. |
+| `crates/core-wasm` | Rust → WASM | Thin `wasm-bindgen` bindings over `core` for the extension. |
+| `crates/native-host` | Rust | Native messaging host. Launches headless Chrome over a pipe, drives the run planner with CDP, and seals results. `install` / `uninstall` subcommands write the host manifest. |
+| `extension/` | TypeScript | MV3 extension: service worker, picker, extractor, popup, dashboard. |
+
+### The run planner
+
+Pagination, "Load more", and click/wait/extract workflows are decided by
+`core::plan::Run`, a state machine that never touches a browser:
+
+```
+let mut run = Run::new(recipe, limits);
+let mut action = run.start();
+loop {
+    let observation = driver.perform(action);   // navigate, click, wait, read records
+    action = run.observe(observation);           // decide what to do next
+    if action is Done or Failed { break }
+}
+```
+
+Two drivers implement the same handful of primitives:
+
+- **Tab driver** (service worker). It opens the page in a background tab, uses
+  `chrome.scripting.executeScript` for reads and clicks, and waits on `chrome.tabs`
+  events.
+- **CDP driver** (native host). It opens a target in headless Chrome and uses
+  `Runtime.evaluate` with the same bundled extractor.
+
+The planner carries the rules fixed in Pocket Scraper PR #1:
+- After a Next click it waits for a stable, non-empty change.
+- New rows are taken relative to the previous page only.
+- An error that persists past the deadline fails the run.
+- The overall deadline is cooperative, so the driver closes the tab or browser
+  when it passes.
+- Warnings are capped, and selector health is reported once per run.
+
+### Data at rest
+
+| Data | Where | Protection |
+|---|---|---|
+| Records | IndexedDB `records` | Sealed: ephemeral X25519 → HKDF-SHA256 → XChaCha20-Poly1305. The AAD binds the recipe ID and record key. |
+| Record keys (dedupe) | IndexedDB, clear | SHA-256 over a per-vault random salt and the canonical row. This reveals only that two rows are equal. |
+| Vault secret key | `chrome.storage.local` | Wrapped by XChaCha20-Poly1305 under an Argon2id key derived from the passphrase. |
+| Vault public key, salt | `chrome.storage.local` | Clear. Public by design, so runs can seal while the vault is locked. |
+| Unlocked secret key | Dashboard page memory (WASM linear memory) | Zeroized on lock and on page close. It never reaches the service worker or the native host. |
+| Recipes | `chrome.storage.local` | Clear. They are re-validated by `core` on every load, because storage is never trusted. |
+| Host browser profiles | `~/Library/Application Support/PocketScraperSecure/profiles/<site-key>` | Owner-only (0700). |
+
+Scheduled runs work while the vault is locked, because sealing needs only the
+public key.
+
+### Trust boundaries and validation
+
+Every message crossing a boundary is parsed by `core::protocol` with
+`deny_unknown_fields` and size caps before anything acts on it:
+
+1. **Page → extractor result.** The extractor runs in the isolated world, but the
+   page controls the DOM it reads. Results are capped (rows, fields, bytes) and
+   treated as untrusted strings. They are never inserted as HTML.
+2. **Picker → service worker.** Only accepted from the tab the picking session
+   was started on, with the session's one-time nonce.
+3. **Extension pages → service worker.** `sender.id` must be this extension and
+   `sender.url` one of its own pages.
+4. **Service worker ↔ native host.** Chrome lets only this extension's ID start
+   the host (`allowed_origins`). The host still validates every request, caps
+   frames at 1 MiB, and runs only `http(s)` recipes.
+5. **Native host ↔ headless Chrome.** A private pipe. The browser runs with a
+   dedicated profile, no extensions, and no remote debugging port.
+
+### Scheduling
+
+`chrome.alarms` fires per-recipe schedules while Chrome is running.
+- If the native host is installed and the recipe opts in, the run happens in
+  headless Chrome with the recipe's own profile.
+- Otherwise it runs in an inactive background tab of the user's browser.
+
+Runs while Chrome is closed are out of scope for v1. They would need a launchd
+agent that starts the host on its own.
+
+## Build
+
+```
+npm run build        # cargo build core-wasm → wasm-bindgen → esbuild → extension/dist
+npm test             # cargo test --workspace, tsc --noEmit, node tests
+cargo run -p pocket-scraper-host -- install --browser chrome
+```
+
+Dependencies are pinned. npm runs with `ignore-scripts=true`, and every locked
+crate and package was at least 14 days old when it was added (see
+`docs/DEPENDENCIES.md`).

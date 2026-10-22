@@ -1,0 +1,7 @@
+/target/
+node_modules/
+extension/dist/
+*.wasm
+.DS_Store
+.env
+.env.*
