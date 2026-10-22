@@ -34,16 +34,21 @@ fn ensure_dirs() -> Result<PathBuf, String> {
     Ok(d)
 }
 
-/// The runner's key, created on first use.
+/// Longest a runner lets one recipe run (bundles may ask for more).
+const RUN_TIMEOUT_CAP_MS: u64 = 60 * 60 * 1000;
+
+/// The runner's key, created on first use. Any other read problem is an error: a
+/// silently replaced key would make every later batch look like a stranger's.
 pub fn identity() -> Result<RunnerKey, String> {
     let path = ensure_dirs()?.join("runner-key");
     match fs::read(&path) {
         Ok(bytes) => RunnerKey::from_bytes(&bytes).map_err(|e| e.to_string()),
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key = RunnerKey::generate();
             write_private(&path, key.to_bytes().as_slice(), 0o600).map_err(|e| e.to_string())?;
             Ok(key)
         }
+        Err(e) => Err(format!("Could not read the runner key {}: {e}", path.display())),
     }
 }
 
@@ -52,8 +57,15 @@ pub fn public_key_b64(key: &RunnerKey) -> String {
     base64::engine::general_purpose::STANDARD.encode(key.public())
 }
 
-fn trusted_vault() -> Option<[u8; 32]> {
-    fs::read(dir().join("trusted-vault")).ok().and_then(|b| b.try_into().ok())
+/// The pinned vault key. Missing means "not set up yet"; anything else unreadable is
+/// an error, never a silent return to trust-on-first-use.
+fn trusted_vault() -> Result<Option<[u8; 32]>, String> {
+    let path = dir().join("trusted-vault");
+    match fs::read(&path) {
+        Ok(b) => b.try_into().map(Some).map_err(|_| format!("{} is damaged; refusing to guess which vault to trust", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
+    }
 }
 
 /// Adds (or replaces) a recipe from a bundle. The first bundle sets which vault this
@@ -61,7 +73,7 @@ fn trusted_vault() -> Option<[u8; 32]> {
 /// come from the same vault.
 pub fn add(bundle_json: &str, trust: Option<&str>) -> Result<Bundle, String> {
     let d = ensure_dirs()?;
-    let pinned = trusted_vault();
+    let pinned = trusted_vault()?;
     let b = bundle::open_bundle(bundle_json, pinned.as_ref()).map_err(|e| e.to_string())?;
     if pinned.is_none() {
         let fingerprint = bundle::fingerprint(&b.vault_signing_key);
@@ -72,8 +84,17 @@ pub fn add(bundle_json: &str, trust: Option<&str>) -> Result<Bundle, String> {
             Some(t) => return Err(format!("The bundle's vault fingerprint is {fingerprint}, not {t}. Nothing was added.")),
             None => {
                 return Err(format!(
-                    "This runner doesn't trust a vault yet. Check that the dashboard shows vault fingerprint {fingerprint}, then run: add <file> --trust {fingerprint}"
+                    "This runner doesn't trust a vault yet. This bundle was signed by vault {fingerprint}. If that matches the vault fingerprint on your dashboard, copy the fingerprint from the dashboard and run: add <file> --trust <fingerprint>"
                 ))
+            }
+        }
+    }
+    // An older export of a recipe can't replace a newer one (no silent rollback).
+    let existing = d.join("recipes").join(format!("{}.pssbundle", b.recipe.id));
+    if let Ok(old) = fs::read_to_string(&existing) {
+        if let Ok(old) = bundle::open_bundle(&old, Some(&b.vault_signing_key)) {
+            if old.created_at > b.created_at {
+                return Err(format!("This bundle ({}) is older than the one installed ({}). Export the recipe again.", b.created_at, old.created_at));
             }
         }
     }
@@ -83,7 +104,7 @@ pub fn add(bundle_json: &str, trust: Option<&str>) -> Result<Bundle, String> {
 
 /// Every stored recipe, re-verified against the trusted vault.
 pub fn recipes() -> Result<Vec<Bundle>, String> {
-    let pinned = trusted_vault().ok_or("No recipes yet: add a bundle first")?;
+    let pinned = trusted_vault()?.ok_or("No recipes yet: add a bundle first")?;
     let mut out = vec![];
     let entries = fs::read_dir(dir().join("recipes")).map_err(|e| e.to_string())?;
     for e in entries.flatten() {
@@ -181,8 +202,9 @@ pub fn run(bundle: &Bundle, key: &RunnerKey) -> Result<(PathBuf, Batch), String>
         Some(chrome) => match paths::profile_dir(&bundle.recipe.origin).map_err(|e| e.to_string()).and_then(|p| Browser::launch_headless(&chrome, &p)) {
             Err(message) => Outcome::Failed { message, attention: false },
             Ok(mut b) => {
-                let watchdog = Watchdog::start(b.pid(), Duration::from_millis(bundle.run_timeout_ms + 5_000));
-                let outcome = driver::run(&mut b, bundle.recipe.clone(), bundle.run_timeout_ms);
+                let timeout = bundle.run_timeout_ms.min(RUN_TIMEOUT_CAP_MS);
+                let watchdog = Watchdog::start(b.pid(), Duration::from_millis(timeout + 5_000));
+                let outcome = driver::run(&mut b, bundle.recipe.clone(), timeout);
                 watchdog.stop();
                 b.close();
                 outcome
@@ -220,7 +242,8 @@ pub fn run(bundle: &Bundle, key: &RunnerKey) -> Result<(PathBuf, Batch), String>
     Ok((path, batch))
 }
 
-/// Runs every scheduled recipe that is due, one after another.
+/// Runs every scheduled recipe that is due, one after another. A recipe that can't
+/// be run is reported and the others still run.
 pub fn run_due(key: &RunnerKey, report: &mut dyn FnMut(&str)) -> Result<usize, String> {
     let _lock = lock()?;
     let state = State::load();
@@ -229,8 +252,10 @@ pub fn run_due(key: &RunnerKey, report: &mut dyn FnMut(&str)) -> Result<usize, S
     for b in recipes()? {
         let s = state.recipes.get(&b.recipe.id).cloned().unwrap_or_default();
         if next_due(&b, &s).is_some_and(|due| due <= now) {
-            let (path, batch) = run(&b, key)?;
-            report(&format!("{}: {:?}, {} rows → {}", b.recipe.name, batch.status, batch.row_count, path.display()));
+            match run(&b, key) {
+                Ok((path, batch)) => report(&format!("{}: {:?}, {} rows → {}", b.recipe.name, batch.status, batch.row_count, path.display())),
+                Err(e) => report(&format!("{}: could not run: {e}", b.recipe.name)),
+            }
             ran += 1;
         }
     }

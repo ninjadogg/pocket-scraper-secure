@@ -45,11 +45,24 @@ pub fn profile_dir(origin: &str) -> std::io::Result<PathBuf> {
 /// Creates (or tightens) an owner-only directory. On Windows the per-user data folder's
 /// inherited ACL already limits access to the account.
 pub fn private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let created = !path.exists();
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let _ = created;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    if created {
+        // Outside %LOCALAPPDATA% (e.g. PSS_DATA_DIR=C:\pss) a new folder would inherit a
+        // broad ACL: limit it to this account and SYSTEM.
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls")
+                .arg(path)
+                .args(["/inheritance:r", "/grant:r", &format!("{user}:(OI)(CI)F"), "/grant:r", "*S-1-5-18:(OI)(CI)F", "/Q"])
+                .status();
+        }
     }
     Ok(())
 }
@@ -76,9 +89,7 @@ pub fn write_private(path: &std::path::Path, content: &[u8], mode: u32) -> std::
         f.write_all(content)?;
         f.sync_all()
     });
-    // Windows can't rename over an existing file.
-    #[cfg(windows)]
-    let _ = std::fs::remove_file(path);
+    // std's rename replaces an existing file atomically on every platform.
     let result = result.and_then(|_| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);

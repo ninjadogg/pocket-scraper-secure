@@ -91,8 +91,8 @@ pub fn handle(bytes: &[u8]) -> Vec<Response> {
                 }
             }
         },
-        Request::CollectBatches {} => crate::transport::collect(20),
-        Request::AckBatches { keys } => vec![crate::transport::ack(keys)],
+        Request::CollectBatches { retry_deferred } => crate::transport::collect(20, retry_deferred),
+        Request::AckBatches { keys, deferred } => vec![crate::transport::ack(keys, deferred)],
         Request::CloseSession { url } => match url::parse(&url) {
             Err(e) => vec![Response::Error { message: e.to_string() }],
             Ok(u) if paths::profile_dir(&u.origin).map(|p| browser::profile_in_use(&p)).unwrap_or(false) => {

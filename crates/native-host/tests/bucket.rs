@@ -62,9 +62,18 @@ fn stub() -> (String, Arc<Mutex<BTreeMap<String, Vec<u8>>>>, Arc<Mutex<Vec<Strin
                     (200, vec![])
                 }
                 "GET" if key.is_empty() => {
-                    let prefix = pairs.iter().find(|(k, _)| k == "prefix").map(|(_, v)| v.clone()).unwrap_or_default();
-                    let keys: String = o.lock().unwrap().keys().filter(|k| k.starts_with(&prefix)).map(|k| format!("<Contents><Key>{k}</Key></Contents>")).collect();
-                    (200, format!("<ListBucketResult><IsTruncated>false</IsTruncated>{keys}</ListBucketResult>").into_bytes())
+                    let get = |name: &str| pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+                    let prefix = get("prefix").unwrap_or_default();
+                    let objects = o.lock().unwrap();
+                    let body = if get("delimiter").as_deref() == Some("/") {
+                        let folders: std::collections::BTreeSet<String> = objects.keys().filter_map(|k| k.strip_prefix(&prefix).and_then(|rest| rest.find('/').map(|i| format!("{prefix}{}", &rest[..=i])))).collect();
+                        folders.iter().map(|f| format!("<CommonPrefixes><Prefix>{f}</Prefix></CommonPrefixes>")).collect::<String>()
+                    } else {
+                        let after = get("start-after").unwrap_or_default();
+                        let max: usize = get("max-keys").and_then(|m| m.parse().ok()).unwrap_or(1000);
+                        objects.keys().filter(|k| k.starts_with(&prefix) && **k > after).take(max).map(|k| format!("<Contents><Key>{k}</Key></Contents>")).collect::<String>()
+                    };
+                    (200, format!("<ListBucketResult><IsTruncated>false</IsTruncated>{body}</ListBucketResult>").into_bytes())
                 }
                 "GET" => match o.lock().unwrap().get(&key) {
                     Some(b) => (200, b.clone()),
@@ -135,27 +144,54 @@ fn runners_upload_and_the_desktop_collects() {
     // The desktop host collects them, in parts, and not again after acking.
     configure(env!("CARGO_BIN_EXE_pocket-scraper-host"), &["collector", "configure"], &desktop_data);
     std::env::set_var("PSS_DATA_DIR", &desktop_data);
-    let responses = transport::collect(20);
-    let mut texts: BTreeMap<String, String> = BTreeMap::new();
-    let mut acked = vec![];
-    for r in &responses {
-        match r {
-            Response::BatchPart { key, text, parts, .. } => {
-                texts.entry(key.clone()).or_default().push_str(text);
-                if *parts > 1 {
-                    assert!(text.len() <= 700 * 1024);
+    let collect = |retry: bool| {
+        let mut texts: BTreeMap<String, String> = BTreeMap::new();
+        let (mut skipped, mut done) = (vec![], None);
+        for r in transport::collect(20, retry) {
+            match r {
+                Response::BatchPart { key, text, parts, .. } => {
+                    if parts > 1 {
+                        assert!(text.len() <= 700 * 1024);
+                    }
+                    texts.entry(key).or_default().push_str(&text);
                 }
-                acked.push(key.clone());
+                Response::BatchSkipped { key, .. } => skipped.push(key),
+                Response::CollectDone { count, more } => done = Some((count, more)),
+                other => panic!("unexpected {other:?}"),
             }
-            Response::CollectDone { count, remaining } => assert_eq!((*count, *remaining), (2, 0)),
-            other => panic!("unexpected {other:?}"),
         }
-    }
-    assert!(responses.iter().filter(|r| matches!(r, Response::BatchPart { .. })).count() > 2, "the big batch is split");
-    assert!(texts.values().any(|t| t == &big), "reassembles byte for byte");
-    acked.dedup();
-    assert!(matches!(transport::ack(acked), Response::Acked { count: 2 }));
-    assert!(matches!(transport::collect(20).as_slice(), [Response::CollectDone { count: 0, remaining: 0 }]));
+        (texts, skipped, done.expect("collect finishes"))
+    };
+    let (texts, skipped, done) = collect(false);
+    assert_eq!(done, (2, false));
+    assert!(skipped.is_empty());
+    assert!(texts.values().any(|t| t == &big), "the big batch is split and reassembled byte for byte");
+    let keys: Vec<String> = texts.keys().cloned().collect();
+    // Defer one (say its runner isn't enrolled yet), handle the other.
+    assert!(matches!(transport::ack(vec![keys[1].clone()], vec![keys[0].clone()]), Response::Acked { count: 1 }));
+    assert_eq!(collect(false).2, (0, false), "nothing new, and the deferred one doesn't block");
+
+    // Newer uploads, an oversized object and a non-batch arrive in the same folder.
+    let folder = keys[0].rsplit_once('/').unwrap().0.to_string();
+    objects.lock().unwrap().insert(format!("{folder}/2026-10-22T120200Z-cccc.pssbatch"), b"{\"third\":true}".to_vec());
+    objects.lock().unwrap().insert(format!("{folder}/2026-10-22T120150Z-huge.pssbatch"), vec![b'x'; 9 * 1024 * 1024]);
+    objects.lock().unwrap().insert(format!("{folder}/notes.txt"), b"ignored".to_vec());
+    let (texts, skipped, done) = collect(false);
+    assert_eq!(done, (2, false));
+    assert_eq!(skipped.len(), 1, "the oversized object is skipped, not fatal: {skipped:?}");
+    assert!(skipped[0].ends_with("huge.pssbatch"));
+    assert_eq!(texts.len(), 1);
+    // The huge one is acked as refused for good; the third imported.
+    let mut handled: Vec<String> = texts.keys().cloned().collect();
+    handled.extend(skipped);
+    transport::ack(handled, vec![]);
+    assert_eq!(collect(false).2, (0, false));
+    // The deferred batch comes back on request.
+    let (texts, _, done) = collect(true);
+    assert_eq!(done.0, 1);
+    assert!(texts.contains_key(&keys[0]));
+    transport::ack(vec![keys[0].clone()], vec![]);
+    assert_eq!(collect(true).2, (0, false));
     assert!(problems.lock().unwrap().is_empty(), "{:?}", problems.lock().unwrap());
     let _ = std::fs::remove_dir_all(&base);
 }

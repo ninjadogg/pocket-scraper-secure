@@ -166,7 +166,9 @@ const LABEL: &str = "com.pocketscraper.runner";
 
 fn schedule(args: &[String]) -> Result<(), String> {
     let every = match (args.get(1).map(String::as_str), args.get(2)) {
-        (Some("--every"), Some(m)) => m.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).ok_or("--every takes 1–1440 minutes")?,
+        // How often to check for due recipes (each recipe keeps its own schedule).
+        // Divisors of 60 keep the cron line exact.
+        (Some("--every"), Some(m)) => m.parse::<u32>().ok().filter(|m| 60 % m == 0).ok_or("--every takes 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60 minutes")?,
         (None, _) => 5,
         _ => return Err("Usage: schedule install [--every MINUTES] | uninstall | print".into()),
     };
@@ -178,7 +180,7 @@ fn schedule(args: &[String]) -> Result<(), String> {
         }
         Some("print") => {
             print!("{}", if cfg!(target_os = "macos") { launchd_plist(&exe, every) } else { systemd_units(&exe, every).join("\n") });
-            println!("\n# Or with cron:\n*/{every} * * * * {} run-due >> {} 2>&1", shell_quote(&exe), shell_quote(&runner::dir().join("runner.log")));
+            println!("\n# Or with cron:\n{}", cron_line(&exe, &runner::dir().join("runner.log"), every));
             Ok(())
         }
         Some("install") if cfg!(windows) => {
@@ -283,6 +285,11 @@ fn shell_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }
 
+/// In a crontab `%` ends the command, so it is escaped.
+fn cron_line(exe: &Path, log: &Path, every: u32) -> String {
+    format!("*/{every} * * * * {} run-due >> {} 2>&1", shell_quote(exe), shell_quote(log)).replace('%', "\\%")
+}
+
 fn launchd_plist(exe: &Path, every: u32) -> String {
     let log = runner::dir().join("runner.log");
     let data = std::env::var("PSS_DATA_DIR").ok();
@@ -310,13 +317,37 @@ fn launchd_plist(exe: &Path, every: u32) -> String {
     )
 }
 
+/// Quotes a value for a systemd unit line (and escapes `%` specifiers).
+fn systemd_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
+}
+
 fn systemd_units(exe: &Path, every: u32) -> [String; 2] {
-    let data = std::env::var("PSS_DATA_DIR").map(|d| format!("Environment=PSS_DATA_DIR={d}\n")).unwrap_or_default();
+    let data = std::env::var("PSS_DATA_DIR").map(|d| format!("Environment={}\n", systemd_quote(&format!("PSS_DATA_DIR={d}")))).unwrap_or_default();
     [
+        // No PrivateTmp: in a user unit it needs user namespaces, which some servers lack.
         format!(
-            "[Unit]\nDescription=Pocket Scraper Secure: run due recipes\n\n[Service]\nType=oneshot\n{data}ExecStart=\"{}\" run-due\nNoNewPrivileges=yes\nPrivateTmp=yes\n",
-            exe.display()
+            "[Unit]\nDescription=Pocket Scraper Secure: run due recipes\n\n[Service]\nType=oneshot\n{data}ExecStart={} run-due\nNoNewPrivileges=yes\n",
+            systemd_quote(&exe.display().to_string())
         ),
         format!("[Unit]\nDescription=Pocket Scraper Secure runner timer\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec={every}min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timer_lines_quote_and_escape_paths() {
+        assert_eq!(
+            cron_line(Path::new("/opt/pss 1/runner"), Path::new("/var/log/100%/r.log"), 15),
+            r"*/15 * * * * '/opt/pss 1/runner' run-due >> '/var/log/100\%/r.log' 2>&1"
+        );
+        assert_eq!(systemd_quote(r#"/srv/a "b"\c 100%"#), r#""/srv/a \"b\"\\c 100%%""#);
+        let [service, timer] = systemd_units(Path::new("/opt/pss 1/runner"), 5);
+        assert!(service.contains(r#"ExecStart="/opt/pss 1/runner" run-due"#), "{service}");
+        assert!(!service.contains("PrivateTmp"));
+        assert!(timer.contains("OnUnitActiveSec=5min"));
+    }
 }

@@ -57,10 +57,11 @@ fn verifying_key(bytes: &[u8]) -> Result<VerifyingKey, Error> {
     VerifyingKey::from_bytes(&bytes).map_err(|_| Error::Crypto("Signing key is invalid"))
 }
 
-/// A short, human-comparable fingerprint of a public key, like `3f2a-9c41-07bd-e5f2-6a18`.
+/// A human-comparable fingerprint of a public key: 128 bits of its SHA-256, like
+/// `3f2a-9c41-07bd-e5f2-6a18-0c33-91de-4b70`.
 pub fn fingerprint(key: &[u8]) -> String {
     let hash = Sha256::digest(key);
-    let hex = crate::hex(&hash[..10]);
+    let hex = crate::hex(&hash[..16]);
     hex.as_bytes().chunks(4).map(|c| std::str::from_utf8(c).expect("hex")).collect::<Vec<_>>().join("-")
 }
 
@@ -308,7 +309,7 @@ mod tests {
 
         let restored = RunnerKey::from_bytes(runner.to_bytes().as_slice()).unwrap();
         assert_eq!(restored.public(), runner.public());
-        assert_eq!(fingerprint(&runner.public()).len(), 24);
+        assert_eq!(fingerprint(&runner.public()).len(), 39);
     }
 
     #[test]

@@ -28,6 +28,7 @@ fn main() -> ExitCode {
                 eprintln!("Refusing connection from {origin}");
                 return ExitCode::from(1);
             }
+            pocket_scraper_host::browser::keep_stdio_to_ourselves();
             handler::serve(&mut std::io::stdin().lock(), &mut std::io::stdout().lock()).map_err(|e| e.to_string())
         }
         _ => {

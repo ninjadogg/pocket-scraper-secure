@@ -6,7 +6,8 @@ use crate::runner;
 use crate::s3::{self, Config};
 use pocket_scraper_core::bundle::{fingerprint, BATCH_MAX};
 use pocket_scraper_core::protocol::Response;
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -19,8 +20,8 @@ pub fn collector_config_path() -> PathBuf {
     paths::data_dir().join("collector.json")
 }
 
-fn seen_path() -> PathBuf {
-    paths::data_dir().join("collector-seen.json")
+fn state_path() -> PathBuf {
+    paths::data_dir().join("collector-state.json")
 }
 
 /// Reads `--endpoint E --bucket B --region R [--prefix P] --access-key-id K`; the
@@ -78,43 +79,107 @@ pub fn upload_outbox(report: &mut dyn FnMut(&str)) -> Result<usize, String> {
     Ok(uploaded)
 }
 
-fn seen() -> BTreeSet<String> {
-    fs::read_to_string(seen_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+/// What the desktop collector remembers, all of it bounded: per runner folder the
+/// last key handled (keys sort by time within a folder, so S3's start-after lists only
+/// newer ones), keys set aside for later, and what the last collect handed out.
+#[derive(Default, Serialize, Deserialize)]
+struct CollectorState {
+    marks: BTreeMap<String, String>,
+    deferred: BTreeSet<String>,
+    pending: Vec<String>,
 }
 
-/// New batches from the bucket, as text split into parts that fit native messages.
-/// At most `max` per call; the dashboard acks them and asks again for the rest.
-pub fn collect(max: usize) -> Vec<Response> {
+const DEFERRED_MAX: usize = 1000;
+
+impl CollectorState {
+    fn load() -> CollectorState {
+        fs::read_to_string(state_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+    fn save(&self) -> Result<(), String> {
+        write_private(&state_path(), serde_json::to_string(self).expect("state").as_bytes(), 0o600).map_err(|e| e.to_string())
+    }
+}
+
+fn folder_of(key: &str) -> &str {
+    key.rfind('/').map(|i| &key[..=i]).unwrap_or("")
+}
+
+/// New batches from the bucket, as text in parts that fit native messages; at most
+/// `max` per call. A key that can't be fetched is reported and skipped, never the
+/// whole collect; the dashboard acks what it handled and asks again for more.
+pub fn collect(max: usize, retry_deferred: bool) -> Vec<Response> {
     let result = (|| -> Result<Vec<Response>, String> {
         let cfg = Config::load(&collector_config_path())?;
         let scratch = paths::data_dir();
-        let seen = seen();
-        let fresh: Vec<String> = s3::list(&cfg, &cfg.prefix, &scratch)?.into_iter().filter(|k| k.ends_with(".pssbatch") && !seen.contains(k)).collect();
-        let mut out = vec![];
-        for key in fresh.iter().take(max) {
-            let bytes = s3::get(&cfg, key, &scratch)?;
-            if bytes.len() > BATCH_MAX {
-                out.push(Response::Error { message: format!("{key} is larger than a batch can be; skipped") });
-                continue;
+        let mut state = CollectorState::load();
+        let mut keys: Vec<String> = if retry_deferred { state.deferred.iter().take(max).cloned().collect() } else { vec![] };
+        let mut more = false;
+        for folder in s3::folders(&cfg, &cfg.prefix, &scratch)? {
+            if keys.len() >= max {
+                more = true;
+                break;
             }
-            let text = String::from_utf8(bytes).map_err(|_| format!("{key} is not text"))?;
-            let parts = split(&text, 700 * 1024);
-            let n = parts.len();
-            out.extend(parts.into_iter().enumerate().map(|(i, t)| Response::BatchPart { key: key.clone(), part: i, parts: n, text: t }));
+            let page = s3::list_after(&cfg, &folder, state.marks.get(&folder).map(String::as_str), max - keys.len() + 1, &scratch)?;
+            let fresh: Vec<String> = page.into_iter().filter(|k| k.ends_with(".pssbatch") && !state.deferred.contains(k)).collect();
+            if fresh.len() > max - keys.len() {
+                more = true;
+            }
+            keys.extend(fresh.into_iter().take(max - keys.len()));
         }
-        out.push(Response::CollectDone { count: fresh.len().min(max), remaining: fresh.len().saturating_sub(max) });
+        let mut out = vec![];
+        for key in &keys {
+            match s3::get(&cfg, key, &scratch, BATCH_MAX as u64) {
+                Err(reason) => out.push(Response::BatchSkipped { key: key.clone(), reason }),
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Err(_) => out.push(Response::BatchSkipped { key: key.clone(), reason: "not a batch file (not text)".into() }),
+                    Ok(text) => {
+                        let parts = split(&text, 700 * 1024);
+                        let n = parts.len();
+                        out.extend(parts.into_iter().enumerate().map(|(i, t)| Response::BatchPart { key: key.clone(), part: i, parts: n, text: t }));
+                    }
+                },
+            }
+        }
+        state.pending = keys.clone();
+        state.save()?;
+        out.push(Response::CollectDone { count: keys.len(), more });
         Ok(out)
     })();
     result.unwrap_or_else(|message| vec![Response::Error { message }])
 }
 
-pub fn ack(keys: Vec<String>) -> Response {
-    let mut seen = seen();
-    let count = keys.len();
-    seen.extend(keys.into_iter().filter(|k| k.len() < 1024));
-    match write_private(&seen_path(), serde_json::to_string(&seen).expect("seen").as_bytes(), 0o600) {
-        Ok(()) => Response::Acked { count },
-        Err(e) => Response::Error { message: e.to_string() },
+/// Records what the dashboard did with the last collect. A folder's mark only moves
+/// past keys that were handled or deferred, in order, so a key that failed to fetch
+/// is tried again next time.
+pub fn ack(keys: Vec<String>, deferred: Vec<String>) -> Response {
+    let mut state = CollectorState::load();
+    let handled: BTreeSet<String> = keys.into_iter().collect();
+    for key in &handled {
+        state.deferred.remove(key);
+    }
+    for key in deferred.iter().filter(|k| state.pending.contains(k)) {
+        if state.deferred.len() < DEFERRED_MAX {
+            state.deferred.insert(key.clone());
+        }
+    }
+    let mut blocked: BTreeSet<String> = BTreeSet::new();
+    for key in std::mem::take(&mut state.pending) {
+        let folder = folder_of(&key).to_string();
+        if blocked.contains(&folder) {
+            continue;
+        }
+        if handled.contains(&key) || state.deferred.contains(&key) {
+            let mark = state.marks.entry(folder).or_default();
+            if key > *mark {
+                *mark = key;
+            }
+        } else {
+            blocked.insert(folder);
+        }
+    }
+    match state.save() {
+        Ok(()) => Response::Acked { count: handled.len() },
+        Err(message) => Response::Error { message },
     }
 }
 

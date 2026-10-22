@@ -96,6 +96,11 @@ fn bundles_in_signed_sealed_batches_out() {
     let (ok, out) = r.cmd(&["add", &bundle_path, "--trust", &vault_fp]);
     assert!(ok, "{out}");
 
+    // An older export of the same recipe can't roll it back.
+    let older = write(&files, "older.pssbundle", &sign_bundle(&secret, &recipe, "2026-10-01T00:00:00Z", 60_000).unwrap());
+    let (ok, out) = r.cmd(&["add", &older]);
+    assert!(!ok && out.contains("older than the one installed"), "{out}");
+
     // A different vault's bundle, and a tampered one, are refused from now on.
     let (_, other) = vault::create(pass, KdfParams::default()).unwrap();
     let foreign = write(&files, "foreign.pssbundle", &sign_bundle(&other, &recipe, "2026-10-22T12:00:00Z", 60_000).unwrap());

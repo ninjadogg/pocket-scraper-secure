@@ -117,14 +117,22 @@ export async function closeStaleRuns(): Promise<void> {
   await done(tx);
 }
 
-/** Records a batch as imported; false if it already was. */
-export async function claimBatch(batchId: string): Promise<boolean> {
-  const tx = (await db()).transaction('batches', 'readwrite');
-  const store = tx.objectStore('batches');
-  const seen = (await result(store.getKey(batchId))) !== undefined;
-  if (!seen) store.add({ batchId, importedAt: new Date().toISOString() });
+/** Stores a runner batch in one transaction: its records, its run and the mark that
+ * it was imported. Either all of it lands or none of it does. */
+export async function importBatch(batchId: string, recipeId: string, records: SealedRecord[], run: RunRecord): Promise<'imported' | 'duplicate'> {
+  const tx = (await db()).transaction(['batches', 'records', 'runs'], 'readwrite');
+  const batches = tx.objectStore('batches');
+  if ((await result(batches.getKey(batchId))) !== undefined) {
+    tx.abort();
+    await done(tx).catch(() => {});
+    return 'duplicate';
+  }
+  batches.add({ batchId, importedAt: new Date().toISOString() });
+  const recordStore = tx.objectStore('records');
+  for (const r of records) recordStore.put({ recipeId, runId: run.id, key: r.key, sealed: r.sealed } satisfies StoredRecord);
+  tx.objectStore('runs').put(run);
   await done(tx);
-  return !seen;
+  return 'imported';
 }
 
 // chrome.storage.local: vault header (wrapped key), recipes, runners, draft, settings.

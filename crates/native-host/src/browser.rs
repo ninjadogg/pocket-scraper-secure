@@ -3,6 +3,7 @@
 //! to find. Each site gets its own profile folder, owner-only.
 
 use crate::cdp::Cdp;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -66,9 +67,35 @@ pub fn find_desktop_chrome() -> Option<PathBuf> {
 pub use crate::paths::private_dir;
 pub use sys::{kill_process, profile_in_use};
 
+/// On Windows, Chrome starts the native host with inheritable stdio handles. Clear
+/// that so browsers this host starts (including a detached session window) don't
+/// keep the native-messaging pipe open.
+pub fn keep_stdio_to_ourselves() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let _ = sys::inheritable(std::io::stdin().as_raw_handle(), false);
+        let _ = sys::inheritable(std::io::stdout().as_raw_handle(), false);
+        let _ = sys::inheritable(std::io::stderr().as_raw_handle(), false);
+    }
+}
+
 pub struct Browser {
     child: Child,
     pub cdp: Cdp,
+    /// Held for the whole run: no other run or session window may use the profile.
+    _lock: fs::File,
+    /// This run's disk cache, outside the profile, deleted when the run ends.
+    cache: PathBuf,
+}
+
+/// Our own lock beside each profile. Chrome's SingletonLock covers visible windows
+/// but not the headless shell, so runs (host and runner share profiles) take this.
+fn lock_profile(profile: &Path) -> Result<fs::File, String> {
+    let path = profile.with_extension("lock");
+    let file = fs::File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| e.to_string())?;
+    file.try_lock().map_err(|_| "This site's browser profile is busy: another run is using it. Try again when it finishes.".to_string())?;
+    Ok(file)
 }
 
 impl Browser {
@@ -78,15 +105,22 @@ impl Browser {
 
     pub fn launch_headless(chrome: &Path, profile: &Path) -> Result<Browser, String> {
         private_dir(profile).map_err(|e| format!("Could not create the browser profile: {e}"))?;
+        let lock = lock_profile(profile)?;
         if profile_in_use(profile) {
             return Err("The session window for this site is still open. Close it, then retry.".into());
         }
+        // Page caches go to a folder of their own and are deleted after the run, so
+        // scraped pages don't stay on disk in the clear.
+        let cache = profile.with_extension(format!("cache-{}", pocket_scraper_core::hex(&pocket_scraper_core::random_bytes::<6>())));
+        private_dir(&cache).map_err(|e| e.to_string())?;
         let mut command = Command::new(chrome);
         command
             .args(COMMON_FLAGS)
             .arg("--headless=new")
             .arg("--remote-debugging-pipe")
             .arg(format!("--user-data-dir={}", profile.display()))
+            .arg(format!("--disk-cache-dir={}", cache.display()))
+            .arg("--disable-gpu-shader-disk-cache")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -95,8 +129,14 @@ impl Browser {
         if std::env::var_os("PSS_BROWSER_NO_SANDBOX").is_some_and(|v| v == "1") {
             command.arg("--no-sandbox");
         }
-        let (child, writer, reader) = sys::spawn_with_pipe(command)?;
-        Ok(Browser { child, cdp: Cdp::new(writer, reader) })
+        let (child, writer, reader) = match sys::spawn_with_pipe(command) {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&cache);
+                return Err(e);
+            }
+        };
+        Ok(Browser { child, cdp: Cdp::new(writer, reader), _lock: lock, cache })
     }
 
     /// Asks Chrome to close, then makes sure it is gone.
@@ -121,6 +161,7 @@ impl Drop for Browser {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        let _ = fs::remove_dir_all(&self.cache);
     }
 }
 
@@ -128,8 +169,10 @@ impl Drop for Browser {
 /// person closes it when done, and the host process may exit meanwhile.
 pub fn open_visible(chrome: &Path, profile: &Path, url: &str) -> Result<(), String> {
     private_dir(profile).map_err(|e| format!("Could not create the browser profile: {e}"))?;
+    // Released straight away: a visible window then holds Chrome's own lock.
+    drop(lock_profile(profile).map_err(|_| "A run is using this site's browser right now. Try again when it finishes.".to_string())?);
     if profile_in_use(profile) {
-        return Err("This site's browser is already open: a session window or a run is using it. Close the window or wait for the run, then try again.".into());
+        return Err("This site's session window is already open.".into());
     }
     Command::new(chrome)
         .args(COMMON_FLAGS)
@@ -280,22 +323,28 @@ mod sys {
     pub fn spawn_with_pipe(mut command: Command) -> Result<(Child, File, File), String> {
         let (cmd_read, cmd_write) = std::io::pipe().map_err(|e| format!("Could not create a pipe: {e}"))?;
         let (resp_read, resp_write) = std::io::pipe().map_err(|e| format!("Could not create a pipe: {e}"))?;
-        inheritable(cmd_read.as_raw_handle())?;
-        inheritable(resp_write.as_raw_handle())?;
+        // Inheritable only for the moment of the spawn, so other children (curl,
+        // taskkill) don't pick these handles up.
+        inheritable(cmd_read.as_raw_handle(), true)?;
+        inheritable(resp_write.as_raw_handle(), true)?;
         command.arg(format!("--remote-debugging-io-pipes={},{}", cmd_read.as_raw_handle() as usize, resp_write.as_raw_handle() as usize));
-        let child = command.spawn().map_err(|e| format!("Could not start Chrome: {e}"))?;
+        let child = command.spawn().map_err(|e| format!("Could not start Chrome: {e}"));
+        let _ = inheritable(cmd_read.as_raw_handle(), false);
+        let _ = inheritable(resp_write.as_raw_handle(), false);
+        let child = child?;
         // The child has its copies; close ours so EOF works.
         drop(cmd_read);
         drop(resp_write);
         Ok((child, File::from(OwnedHandle::from(cmd_write)), File::from(OwnedHandle::from(resp_read))))
     }
 
-    fn inheritable(handle: std::os::windows::io::RawHandle) -> Result<(), String> {
+    /// Sets or clears a handle's inherit flag.
+    pub fn inheritable(handle: std::os::windows::io::RawHandle, on: bool) -> Result<(), String> {
         use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
         #[allow(unsafe_code)]
-        // SAFETY: `handle` is a live pipe handle owned by this process; only its
-        // inherit flag changes.
-        let ok = unsafe { SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        // SAFETY: `handle` is a live handle owned by this process; only its inherit
+        // flag changes.
+        let ok = unsafe { SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, if on { HANDLE_FLAG_INHERIT } else { 0 }) };
         if ok == 0 {
             return Err(format!("Could not share the pipe with Chrome: {}", std::io::Error::last_os_error()));
         }

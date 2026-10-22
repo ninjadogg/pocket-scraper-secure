@@ -28,10 +28,20 @@ pub enum Request {
     OpenSession { url: String },
     /// Close it again; cookies stay in the profile.
     CloseSession { url: String },
-    /// Fetch new result batches from the configured bucket.
-    CollectBatches {},
-    /// The dashboard handled these bucket objects; don't fetch them again.
-    AckBatches { keys: Vec<String> },
+    /// Fetch new result batches from the configured bucket; with `retry_deferred`,
+    /// also the ones set aside earlier.
+    CollectBatches {
+        #[serde(default)]
+        retry_deferred: bool,
+    },
+    /// After a collect: `keys` were handled for good (imported, duplicate or refused);
+    /// `deferred` can't be handled yet (runner not enrolled, recipe missing) and are
+    /// set aside so they don't block newer results.
+    AckBatches {
+        keys: Vec<String>,
+        #[serde(default)]
+        deferred: Vec<String>,
+    },
 }
 
 /// A validated `Request::Run`.
@@ -75,7 +85,9 @@ pub enum Response {
     SessionClosed { origin: String },
     /// One piece of a batch file's text (files are split to fit Chrome's 1 MiB limit).
     BatchPart { key: String, part: usize, parts: usize, text: String },
-    CollectDone { count: usize, remaining: usize },
+    /// One object couldn't be fetched this time (or is too large ever to be a batch).
+    BatchSkipped { key: String, reason: String },
+    CollectDone { count: usize, more: bool },
     Acked { count: usize },
     Error { message: String },
 }

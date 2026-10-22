@@ -374,7 +374,8 @@ impl Run {
             let entry = self.health.entry(field.name.clone()).or_insert_with(|| Health { field, count: 0, first: label.to_string() });
             entry.count += 1;
         }
-        self.warnings.extend(extraction.warnings.into_iter().map(|w| format!("{label}: {w}")));
+        // Prefixed warnings stay within the length a result batch accepts.
+        self.warnings.extend(extraction.warnings.into_iter().map(|w| clip(format!("{label}: {w}"), WARNING_BYTES_MAX)));
         let batch: Vec<Row> = extraction.rows.into_iter().skip(skip).collect();
         if batch.is_empty() {
             self.warnings.push(format!("{label}: no nonempty records"));
@@ -413,6 +414,19 @@ impl Run {
         }
         Ok(Action::Finish { rows: std::mem::take(&mut self.rows), warnings })
     }
+}
+
+/// Shortens to at most `max` bytes at a character boundary.
+fn clip(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max - 3;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push('…');
+    }
+    s
 }
 
 fn fail(message: impl Into<String>, attention: bool) -> Action {

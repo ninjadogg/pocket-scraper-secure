@@ -176,8 +176,9 @@ fn recipes_run_in_headless_chrome_over_the_pipe() {
     assert!(matches!(responses.last(), Some(Response::RunDone { row_count: 4, .. })), "{responses:?}");
     // Profiles are per site and owner-only.
     let profiles = data.join("profiles");
-    let entries: Vec<_> = std::fs::read_dir(&profiles).unwrap().flatten().collect();
-    assert_eq!(entries.len(), 1);
+    // One profile folder (plus its lock file): each run's cache folder is gone.
+    let entries: Vec<_> = std::fs::read_dir(&profiles).unwrap().flatten().filter(|e| e.path().is_dir()).collect();
+    assert_eq!(entries.len(), 1, "{:?}", std::fs::read_dir(&profiles).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
     // The folder name is salted: it isn't the plain hash of the origin.
     let unsalted = pocket_scraper_core::url::site_key(b"", &base);
     assert_ne!(entries[0].file_name().to_string_lossy(), unsalted);

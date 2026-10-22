@@ -214,7 +214,14 @@ test('the extension collects, seals, shows and protects records end to end', { t
       req.on('end', () => {
         const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
         if (req.method === 'PUT') { bucket.set(key, Buffer.concat(chunks)); res.end(); }
-        else if (!key) res.end(`<ListBucketResult><IsTruncated>false</IsTruncated>${[...bucket.keys()].map(k => `<Key>${k}</Key>`).join('')}</ListBucketResult>`);
+        else if (!key) {
+          const prefix = url.searchParams.get('prefix') ?? '';
+          const keys = [...bucket.keys()].sort().filter(k => k.startsWith(prefix));
+          const body = url.searchParams.get('delimiter') === '/'
+            ? [...new Set(keys.map(k => k.slice(prefix.length)).filter(r => r.includes('/')).map(r => prefix + r.slice(0, r.indexOf('/') + 1)))].map(f => `<CommonPrefixes><Prefix>${f}</Prefix></CommonPrefixes>`).join('')
+            : keys.filter(k => k > (url.searchParams.get('start-after') ?? '')).slice(0, Number(url.searchParams.get('max-keys') ?? 1000)).map(k => `<Contents><Key>${k}</Key></Contents>`).join('');
+          res.end(`<ListBucketResult><IsTruncated>false</IsTruncated>${body}</ListBucketResult>`);
+        }
         else if (bucket.has(key)) res.end(bucket.get(key));
         else { res.statusCode = 404; res.end(); }
       });

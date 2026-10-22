@@ -93,15 +93,8 @@ pub fn install(progress: &mut dyn FnMut(&str)) -> Result<PathBuf, String> {
     if !exe.is_file() {
         return Err("The downloaded archive did not contain chrome-headless-shell".into());
     }
-    // Older pinned versions are no longer used.
-    if let Ok(entries) = fs::read_dir(&root) {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            if name.to_string_lossy() != lock.version && !name.to_string_lossy().starts_with('.') && e.path().is_dir() {
-                let _ = fs::remove_dir_all(e.path());
-            }
-        }
-    }
+    // Other versions are left alone: a host and a runner of different builds can
+    // share this folder.
     Ok(exe)
 }
 

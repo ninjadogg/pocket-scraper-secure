@@ -24,9 +24,10 @@ encrypted and signed.
 
 | Threat | Protection |
 |---|---|
-| Someone gets the runner's disk | It holds sealed records only. Without the passphrase they can't be opened. The runner's key, trusted vault key, recipes and website profiles are owner-only. |
+| Someone gets the runner's disk | Results are sealed before they're written, so stored batches can't be opened without the passphrase. Each run's page cache goes in its own folder, which is deleted when the run ends. What stays: the recipes, and the browser profiles (cookies and history, owner-only but not encrypted). |
+| Someone controls the runner machine | They can't read past results. They *can* see pages and rows of later runs before sealing, use the runner's website sessions, and send false data signed with its key. Remove the runner under Runners to stop accepting its batches. |
 | A forged or altered recipe | A runner accepts bundles only from the vault it pinned at first `add` (`--trust <fingerprint>`). Every stored bundle is re-verified before each run. |
-| A forged or altered result | The dashboard accepts a batch only if it is signed by an enrolled runner and sealed to this vault, and only once (batch IDs are remembered). |
+| A forged or altered result | The dashboard accepts a batch only if it is signed by an enrolled runner and sealed to this vault, and only once (batch IDs are remembered). Storing a batch is all-or-nothing, and nothing is acknowledged to the bucket unless it was stored. |
 | The bucket or the network | Batches are already encrypted and signed, so the bucket gets only availability, not trust. Uploads use HTTPS (TLS 1.2+). |
 | A recipe wandering off its site | The planner fails any read from another origin. |
 | The runner's own browser | Google's Chrome for Testing headless shell, pinned by SHA-256 and never auto-updated. The sandbox is on unless you explicitly turn it off. |
@@ -57,20 +58,24 @@ In the dashboard, unlock the vault and click **Export for runner** on a recipe. 
 the `.pssbundle` file to the runner, then run:
 
 ```
-pocket-scraper-runner add Quotes.pssbundle --trust 3f2a-9c41-07bd-e5f2-6a18
+pocket-scraper-runner add Quotes.pssbundle --trust 3f2a-9c41-07bd-e5f2-6a18-0c33-91de-4b70
 pocket-scraper-runner list
 pocket-scraper-runner run <recipe-id>     # try it once
 ```
 
-`--trust` is needed only for the first bundle. It must equal the vault fingerprint
-shown on the dashboard's vault card. Re-export and `add` again after you change a
-recipe. A recipe's schedule (every 15 minutes … 30 days) comes from the recipe;
-manual-only recipes run with `run`.
+`--trust` is needed only for the first bundle. Copy it from the dashboard's vault
+card, not from the runner's message. Re-export and `add` again after you change a
+recipe; an older export can't replace a newer one.
+
+A recipe's schedule (every 15 minutes … 30 days) comes from the recipe; manual-only
+recipes run with `run`. A runner gives one recipe at most an hour. Deleting a recipe
+in the dashboard doesn't reach runners: remove it there too with
+`pocket-scraper-runner remove <recipe-id>`.
 
 ### Run on a timer
 
 ```
-pocket-scraper-runner schedule install --every 5    # checks for due recipes every 5 min
+pocket-scraper-runner schedule install --every 5    # check for due recipes every 5 min (1–60, dividing 60)
 pocket-scraper-runner schedule print                # see exactly what it installs
 pocket-scraper-runner schedule uninstall
 ```
@@ -112,6 +117,14 @@ B2 or MinIO. Use two keys:
 
   The dashboard then shows **Collect from bucket**.
 
+  The host remembers how far it has read in each runner's folder, so collecting stays
+  quick however big the bucket grows. Collected objects aren't needed afterwards: a
+  lifecycle rule that expires them after 30 days keeps the bucket small.
+
+  An object that can't be fetched is skipped and tried again next time. Results set
+  aside are those whose runner isn't enrolled yet, or whose recipe was deleted here.
+  They don't hold up newer ones; **Retry set-aside** tries them again.
+
 Secrets are read from `PSS_S3_SECRET_ACCESS_KEY` or stdin, never from the command
 line. They are stored owner-only, and request signatures reach curl through a
 private file, not the process list.
@@ -143,8 +156,17 @@ In a container that has no user namespaces at all, `PSS_BROWSER_NO_SANDBOX=1` tu
 the sandbox off. It is a last resort: the sandbox is what contains a malicious page.
 Don't combine it with signed-in sessions you care about.
 
-**Windows.** Requires Windows 10 1803 or later (curl ships with it), x64.
+**curl.** Bucket transfers and the browser download use the system's curl, 7.55 or
+later. That covers Windows 10 1803+, Ubuntu 18.04+ and any current macOS.
 
-**Session sign-in for runners.** A runner has no window for signing in. Recipes for
-public pages work as-is. For sites that need a login, sign in through session setup
-on a desktop. Copying a profile to a runner is not supported yet.
+**Windows.** Requires Windows 10 1803 or later, x64. With `PSS_DATA_DIR` outside
+`%LOCALAPPDATA%`, new folders are limited to your account and SYSTEM (icacls).
+
+**Session sign-in.** A runner has no window for signing in, so recipes for public
+pages work as-is. Sessions signed in through the desktop's session setup work for the
+native host's runs, with two limits:
+- On Windows, desktop Chrome encrypts cookies in a way the headless shell can't read.
+- A desktop Chrome much newer than the pinned shell may write a profile the shell
+  refuses.
+
+Copying a profile to a runner isn't supported yet.

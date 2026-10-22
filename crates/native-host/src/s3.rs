@@ -28,12 +28,18 @@ pub struct Config {
 impl Config {
     /// Checks the settings; https only, except a local test endpoint.
     pub fn check(&self) -> Result<(), String> {
-        let local = self.endpoint.starts_with("http://127.0.0.1:") || self.endpoint.starts_with("http://localhost:");
-        if !self.endpoint.starts_with("https://") && !local {
-            return Err("The endpoint must start with https://".into());
+        // scheme://host[:port], nothing else: no userinfo, path, query or spaces.
+        let (scheme, authority) = self.endpoint.split_once("://").ok_or("The endpoint must start with https://")?;
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, Some(p)),
+            _ => (authority, None),
+        };
+        if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+            return Err("Give the endpoint as https://host[:port] with no path, e.g. https://s3.us-east-1.amazonaws.com".into());
         }
-        if self.endpoint.ends_with('/') || self.endpoint.contains(char::is_whitespace) {
-            return Err("Give the endpoint without a trailing slash, e.g. https://s3.us-east-1.amazonaws.com".into());
+        let local = scheme == "http" && (host == "127.0.0.1" || host == "localhost") && port.is_some();
+        if scheme != "https" && !local {
+            return Err("The endpoint must start with https://".into());
         }
         if self.bucket.is_empty() || !self.bucket.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.') {
             return Err("Bucket names are lower-case letters, digits, dots and dashes".into());
@@ -44,8 +50,11 @@ impl Config {
         if self.prefix.contains("..") || self.prefix.starts_with('/') || !self.prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b)) {
             return Err("The prefix may use letters, digits and - _ . /".into());
         }
-        if self.access_key_id.is_empty() || self.secret_access_key.is_empty() {
-            return Err("Both the access key ID and the secret are needed".into());
+        if self.access_key_id.is_empty() || self.access_key_id.len() > 128 || !self.access_key_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            return Err("The access key ID is letters, digits, - and _".into());
+        }
+        if self.secret_access_key.is_empty() || self.secret_access_key.chars().any(char::is_control) {
+            return Err("The secret access key is missing or malformed".into());
         }
         Ok(())
     }
@@ -111,7 +120,8 @@ pub fn sign(method: &str, path: &str, query: &[(&str, &str)], headers: &[(&str, 
     let date = &amz_date[..8];
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex_sha256(canonical_request.as_bytes()));
-    let k_date = Zeroizing::new(hmac(format!("AWS4{secret}").as_bytes(), date));
+    let k_secret = Zeroizing::new(format!("AWS4{secret}"));
+    let k_date = Zeroizing::new(hmac(k_secret.as_bytes(), date));
     let k_region = Zeroizing::new(hmac(&k_date, region));
     let k_service = Zeroizing::new(hmac(&k_region, service));
     let k_signing = Zeroizing::new(hmac(&k_service, "aws4_request"));
@@ -129,7 +139,8 @@ fn amz_date() -> String {
 
 /// Sends one signed request with curl. Headers go through a private temporary file
 /// (curl's `-H @file`), so the signature never appears in the process list.
-fn curl(cfg: &Config, method: &str, key: Option<&str>, query: &[(&str, &str)], body: Option<&Path>, scratch: &Path) -> Result<Vec<u8>, String> {
+/// `limit` caps the response size (curl stops reading beyond it).
+fn curl(cfg: &Config, method: &str, key: Option<&str>, query: &[(&str, &str)], body: Option<&Path>, scratch: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let path = match key {
         Some(k) => format!("/{}/{}", cfg.bucket, encode(k, true)),
         None => format!("/{}", cfg.bucket),
@@ -151,7 +162,9 @@ fn curl(cfg: &Config, method: &str, key: Option<&str>, query: &[(&str, &str)], b
         url.push_str(&q.join("&"));
     }
     let mut cmd = Command::new("curl");
-    cmd.args(["--fail-with-body", "--silent", "--show-error", "--max-time", "120", "-X", method, "-H"]).arg(format!("@{}", header_file.display()));
+    // The status comes back on the last line (works with curl older than 7.76, which
+    // lacks --fail-with-body).
+    cmd.args(["--silent", "--show-error", "--max-time", "120", "--max-filesize", &limit.to_string(), "--write-out", "\n%{http_code}", "-X", method, "-H"]).arg(format!("@{}", header_file.display()));
     if cfg.endpoint.starts_with("https://") {
         cmd.args(["--proto", "=https", "--tlsv1.2"]);
     }
@@ -161,38 +174,48 @@ fn curl(cfg: &Config, method: &str, key: Option<&str>, query: &[(&str, &str)], b
     let out = cmd.arg(&url).output();
     let _ = std::fs::remove_file(&header_file);
     let out = out.map_err(|e| format!("Could not run curl: {e}"))?;
-    if !out.status.success() {
-        let body = String::from_utf8_lossy(&out.stdout);
-        let code = body.split("<Code>").nth(1).and_then(|s| s.split('<').next()).unwrap_or("");
-        return Err(format!("{method} {} failed: {} {code}", key.unwrap_or("(list)"), String::from_utf8_lossy(&out.stderr).trim()));
+    let mut body = out.stdout;
+    let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+    let status: u16 = std::str::from_utf8(&body[split..]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    body.truncate(split);
+    if !out.status.success() || !(200..300).contains(&status) {
+        let text = String::from_utf8_lossy(&body);
+        let code = text.split("<Code>").nth(1).and_then(|s| s.split('<').next()).unwrap_or("");
+        return Err(format!("{method} {} failed: HTTP {status} {code} {}", key.unwrap_or("(list)"), String::from_utf8_lossy(&out.stderr).trim()));
     }
-    Ok(out.stdout)
+    Ok(body)
 }
+
+const LISTING_MAX: u64 = 16 * 1024 * 1024;
 
 pub fn put_file(cfg: &Config, key: &str, file: &Path, scratch: &Path) -> Result<(), String> {
-    curl(cfg, "PUT", Some(key), &[], Some(file), scratch).map(|_| ())
+    curl(cfg, "PUT", Some(key), &[], Some(file), scratch, 1024 * 1024).map(|_| ())
 }
 
-pub fn get(cfg: &Config, key: &str, scratch: &Path) -> Result<Vec<u8>, String> {
-    curl(cfg, "GET", Some(key), &[], None, scratch)
-}
-
-/// Object keys under `prefix` (ListObjectsV2, following continuation tokens).
-pub fn list(cfg: &Config, prefix: &str, scratch: &Path) -> Result<Vec<String>, String> {
-    let mut keys = vec![];
-    let mut token: Option<String> = None;
-    loop {
-        let mut query = vec![("list-type", "2"), ("prefix", prefix)];
-        if let Some(t) = token.as_deref() {
-            query.push(("continuation-token", t));
-        }
-        let xml = String::from_utf8(curl(cfg, "GET", None, &query, None, scratch)?).map_err(|_| "The bucket listing is not text")?;
-        keys.extend(tags(&xml, "Key").into_iter().map(|k| unescape(&k)));
-        token = if tags(&xml, "IsTruncated").first().map(String::as_str) == Some("true") { tags(&xml, "NextContinuationToken").into_iter().next().map(|t| unescape(&t)) } else { None };
-        if token.is_none() || keys.len() > 100_000 {
-            return Ok(keys);
-        }
+/// Fetches an object of at most `limit` bytes; larger objects are refused unread.
+pub fn get(cfg: &Config, key: &str, scratch: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let body = curl(cfg, "GET", Some(key), &[], None, scratch, limit)?;
+    if body.len() as u64 > limit {
+        return Err(format!("{key} is larger than {limit} bytes"));
     }
+    Ok(body)
+}
+
+/// One page (at most `max` keys) of objects under `prefix`, after `start_after`.
+pub fn list_after(cfg: &Config, prefix: &str, start_after: Option<&str>, max: usize, scratch: &Path) -> Result<Vec<String>, String> {
+    let max = max.clamp(1, 1000).to_string();
+    let mut query = vec![("list-type", "2"), ("prefix", prefix), ("max-keys", max.as_str())];
+    if let Some(after) = start_after {
+        query.push(("start-after", after));
+    }
+    let xml = String::from_utf8(curl(cfg, "GET", None, &query, None, scratch, LISTING_MAX)?).map_err(|_| "The bucket listing is not text")?;
+    Ok(tags(&xml, "Key").into_iter().map(|k| unescape(&k)).collect())
+}
+
+/// The "folders" (common prefixes) directly under `prefix`.
+pub fn folders(cfg: &Config, prefix: &str, scratch: &Path) -> Result<Vec<String>, String> {
+    let xml = String::from_utf8(curl(cfg, "GET", None, &[("list-type", "2"), ("prefix", prefix), ("delimiter", "/")], None, scratch, LISTING_MAX)?).map_err(|_| "The bucket listing is not text")?;
+    Ok(tags(&xml, "CommonPrefixes").iter().flat_map(|c| tags(c, "Prefix")).map(|p| unescape(&p)).take(1000).collect())
 }
 
 fn tags(xml: &str, name: &str) -> Vec<String> {
@@ -231,6 +254,10 @@ mod tests {
         for bad in [
             Config { endpoint: "http://s3.example.com".into(), ..ok.clone() },
             Config { endpoint: "https://s3.example.com/".into(), ..ok.clone() },
+            Config { endpoint: "http://localhost:@evil.example".into(), ..ok.clone() },
+            Config { endpoint: "http://localhost:9000@evil.example".into(), ..ok.clone() },
+            Config { endpoint: "https://user@s3.example.com".into(), ..ok.clone() },
+            Config { access_key_id: "AK\nx-evil: 1".into(), ..ok.clone() },
             Config { bucket: "My_Bucket".into(), ..ok.clone() },
             Config { prefix: "../x".into(), ..ok.clone() },
             Config { secret_access_key: "".into(), ..ok.clone() },

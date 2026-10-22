@@ -331,3 +331,16 @@ fn observations_parse_from_driver_json() {
     let action = serde_json::to_string(&Action::Click { selector: "#a".into(), timeout_ms: 5 }).unwrap();
     assert_eq!(action, r##"{"type":"click","selector":"#a","timeoutMs":5}"##);
 }
+
+#[test]
+fn long_warnings_are_clipped_to_what_a_batch_accepts() {
+    let mut run = Run::new(recipe(serde_json::json!({})), fast());
+    run.start(0);
+    run.observe(Observation { now_ms: 1, event: Event::Navigated { status: 200 } });
+    run.observe(Observation { now_ms: 2, event: Event::Waited {} });
+    let long = "w".repeat(WARNING_BYTES_MAX - 3) + "“"; // exactly the most an extraction may return
+    let out = run.observe(Observation { now_ms: 3, event: Event::Read { url: "https://example.org/list".into(), status: 200, error: None, challenge: false,
+        output: Some(ExtractOutput { page_url: "https://example.org/list".into(), rows: vec![Row { page_url: "https://example.org/list".into(), fields: [("name".to_string(), "a".to_string())].into() }], warnings: vec![long], empty_fields: vec![] }) } });
+    let w = warnings(&out);
+    assert!(w[0].len() <= WARNING_BYTES_MAX && w[0].starts_with("Page 1: www") && w[0].ends_with('…'), "{}", w[0].len());
+}
