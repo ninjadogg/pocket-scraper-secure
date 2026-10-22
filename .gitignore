@@ -5,3 +5,5 @@ extension/dist/
 .DS_Store
 .env
 .env.*
+/.tools/
+extension/build/

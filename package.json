@@ -11,7 +11,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p extension",
-    "test": "cargo test --workspace && npm run build && npm run typecheck && node --test --test-concurrency=1 tests/"
+    "test": "cargo test --workspace && npm run build && npm run typecheck && node --test --test-concurrency=1 \"tests/**/*.test.mjs\""
   },
   "devDependencies": {
     "@types/chrome": "0.3.4",

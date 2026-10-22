@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Pocket Scraper Secure",
+  "version": "0.1.0",
+  "description": "Click to collect data from websites. Encrypted storage, a memory-safe core, and no network listener.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm9SicwQbOP6eGbVxb2oYgusBVhZPIzB3D7EgtMna/NZQuXx0QczLOVDWATMwzJ3PdoEogxBZqv4pqoQul/tUISaPPf4BtFOV2UeJKVQvUaTJnLtfMsdvtYsEC2Bp+3+oBnLTA7BK1Ll+E/dix+JL5au0OauSc++8oqWNMIBtIP+CUKF2VdR8/X2dOjbIDdCT0xNusVPnnRiAZz4XjikLKbMgbPJ3gG+3z684Tk8491FtHatQTc9rQ35+1WRmKfwxFAICAeMyLlq8UJo8/NuPqpn3pNbDB/CzmUgih6+05lna6VC8YMASue+coDjMox9PmvOWhcEWtHZJ03nCPYMz6QIDAQAB",
+  "minimum_chrome_version": "123",
+  "incognito": "not_allowed",
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Pocket Scraper Secure",
+    "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" }
+  },
+  "options_ui": { "page": "dashboard.html", "open_in_tab": true },
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
+  "permissions": ["storage", "unlimitedStorage", "alarms", "scripting", "activeTab", "nativeMessaging"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
+  }
+}
