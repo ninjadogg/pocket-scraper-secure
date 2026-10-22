@@ -64,8 +64,24 @@ npm test                                                   # Rust tests, WASM te
 4. Read the records in the dashboard after unlocking, and export them as CSV
    (formula-safe) or JSON. The vault locks itself after 10 minutes of inactivity.
 
-Schedules run while Chrome is open. If a site starts asking for sign-in or
-verification, its schedules pause until you deal with it in the dashboard.
+Schedules in the extension run while Chrome is open. If a site starts asking for
+sign-in or verification, its schedules pause until you deal with it in the dashboard.
+
+## Run on its own: VMs, servers, this Mac
+
+Teach a recipe once, then let a **runner** run it on a timer without Chrome. Runners
+exist for Linux (x64 and arm64), macOS and Windows.
+
+1. On the runner, `pocket-scraper-runner init`. Enrol its key under **Runners** in the
+   dashboard.
+2. **Export for runner** on a recipe, copy the file over, then
+   `pocket-scraper-runner add <file> --trust <vault fingerprint>`.
+3. `pocket-scraper-runner schedule install`.
+4. Bring results back with **Import results** (files) or **Collect from bucket**
+   (S3-compatible bucket).
+
+Runners never get your passphrase: results are sealed before they touch the runner's
+disk. See [docs/RUNNER.md](docs/RUNNER.md).
 
 ## Layout
 
@@ -73,7 +89,8 @@ verification, its schedules pause until you deal with it in the dashboard.
 |---|---|
 | `crates/core` | Validation, run planner, records, CSV, vault, host protocol |
 | `crates/core-wasm` | WebAssembly bindings for the extension |
-| `crates/native-host` | Native messaging host and its headless Chrome driver |
+| `crates/native-host` | Native messaging host, the standalone runner, the headless browser driver and the bucket transport |
+| `browser/headless-shell.json` | The pinned headless browser (version and SHA-256 per platform) |
 | `extension/src` | Service worker, popup, dashboard, picker, shared extractor |
 | `tests/` | WASM tests and the browser end-to-end test |
 

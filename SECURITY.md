@@ -31,8 +31,9 @@ public issues. Test only systems and accounts you own or may test.
 - **Dependencies.** Pinned, at least 14 days old when added, with npm install
   scripts disabled (see [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)).
 - **Unsafe code.** `unsafe` is forbidden in the core and the WASM bindings. In the
-  native host it is limited to `crates/native-host/src/browser.rs`: the pipe
-  hand-off to Chrome and the `kill` calls for the lock check and watchdog.
+  native host and runner it is limited to `crates/native-host/src/browser.rs` (the
+  pipe hand-off to Chrome, and `kill` for the lock check and watchdog) and one
+  `getuid` for launchd.
 
 ## Things to know
 
@@ -43,3 +44,6 @@ public issues. Test only systems and accounts you own or may test.
 - Anyone who can write your Chrome profile can make later runs seal to their own
   key. You'd notice at the next unlock.
 - A forgotten passphrase cannot be recovered.
+- A runner machine that is taken over can't read results, but it can use its website
+  sessions and send false data in its own name. Remove it under Runners to stop
+  accepting its batches.

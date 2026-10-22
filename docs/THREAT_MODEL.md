@@ -18,13 +18,17 @@
 | A4 | Another extension | Messages the service worker | `externally_connectable` is absent (no external messaging), and `sender.id` is checked on every message. |
 | A5 | Local attacker who can read the Chrome profile on disk (backups, stolen disk without FileVault, other users with read access) | Reads stored records, or confirms a guessed row | Records are sealed under random keys, with the observation time inside the ciphertext. Without the passphrase, an attacker sees how many records each recipe has, the run history (times, row counts, errors) and the recipes themselves. They can't see contents, and can't test whether a guessed row is stored. |
 | A6 | Same attacker | Brute-forces the passphrase | Argon2id (19 MiB, 2 passes, 1 lane: OWASP's minimum). Passphrases under 12 characters are refused. |
-| A7 | Same attacker | Reads host browser profiles (live sessions) | Owner-only 0700 directories, named by a salted hash. **Not encrypted.** A session is only as safe as the OS account; this is documented for the user. |
+| A7 | Same attacker (also on runners) | Reads host or runner browser profiles (live sessions) | Owner-only 0700 directories, named by a salted hash. **Not encrypted.** A session is only as safe as the OS account; this is documented for the user. |
 | A8 | Compromised dependency (supply chain) | Malicious code at build or run time | Minimal dependency set. Exact pins, a lockfile with checksums, and a 14-day minimum age. npm `ignore-scripts=true`. No runtime network fetches. The extension bundles everything, and the CSP forbids remote code. |
 | A9 | Someone with access to the unlocked dashboard tab | Reads records | Auto-lock after inactivity (default 10 min). The secret key is only in dashboard memory and is zeroized on lock or close. |
 | A10 | Malicious recipe import | Points runs at `file:`, `chrome:` or internal URLs, or sets abusive limits | `core::recipe` accepts only `http(s)`, caps every field, and requires a host permission granted by the user per origin. |
-| A11 | Memory-safety bugs | Exploit parser or crypto code | Rust core and host. `unsafe` is forbidden in `core` and `core-wasm`. In the host it is denied except in `browser.rs`: `pipe`, `fcntl`, `close`, `File::from_raw_fd` and the `pre_exec` `dup2` that hand Chrome its pipe, plus `kill` (lock check and watchdog). Each block carries a SAFETY comment. |
+| A11 | Memory-safety bugs | Exploit parser or crypto code | Rust core and host. `unsafe` is forbidden in `core` and `core-wasm`. In the host and runner it is denied except in `browser.rs` (Unix: `pipe`, `fcntl`, `close`, `File::from_raw_fd` and the `pre_exec` `dup2` that hand Chrome its pipe, plus `kill`; Windows: `SetHandleInformation` to make the pipe inheritable) and `getuid` for launchd. Each block carries a SAFETY comment. |
 | A12 | Local attacker who can **write** the Chrome profile | Replaces the vault's public key so later runs seal to them | Not preventable while runs seal without the passphrase. The same access could also modify an unpacked extension's files. The next unlock fails ("modified"), so the swap is noticed. Profile write access is otherwise out of scope (see below). |
-| A13 | A recipe whose page redirects, or whose clicks lead, to another site | Reads that site with the run's browser session | The planner fails any read whose origin isn't the recipe's own (both drivers). Tab runs are also limited to granted origins by Chrome. |
+| A13 | A recipe whose page redirects, or whose clicks lead, to another site | Reads that site with the run's browser session | The planner fails any read whose origin isn't the recipe's own (all drivers). Tab runs are also limited to granted origins by Chrome. |
+| A14 | Attacker who takes over a runner machine (VM, server) | Reads results, or feeds the runner other recipes | The runner holds no passphrase or secret key, and seals rows before writing them, so past and future results stay unreadable. It accepts recipes only from the vault it pinned. **It can still** use its website sessions, run its own recipes, and send false data signed with its key: remove the runner from the dashboard to stop accepting its batches. |
+| A15 | Anyone who can write result files or the bucket | Injects, alters or replays results | Batches must be signed by an enrolled runner and sealed to this vault. Each is accepted once, and the signature covers the format so a bundle can't pose as a batch. |
+| A16 | The bucket provider or the network | Reads or tampers with results in transit or at rest | Batches are encrypted and signed before upload. TLS 1.2+ is enforced by curl. The runner's bucket key should be write-only and the desktop's read-only. |
+| A17 | Compromised headless browser download | Runs malicious code on runners | Google's Chrome for Testing build is pinned by size and SHA-256 per platform. A download that doesn't match is refused and nothing is installed. |
 
 ## Out of scope
 
@@ -32,7 +36,7 @@
   memory, keylog the passphrase, or use the sessions directly.
 - A compromised Chrome or OS.
 - Websites detecting automation. CAPTCHAs are not solved.
-- Runs while Chrome is closed (v1).
+- Signing in to websites on a runner (sessions must come from desktop session setup; copying profiles isn't supported yet).
 
 ## Residual risks the user should know
 

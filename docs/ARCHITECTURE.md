@@ -49,6 +49,8 @@ around a smaller attack surface:
 | `crates/core-wasm` | Rust → WASM | Thin `wasm-bindgen` bindings over `core` for the extension. |
 | `crates/native-host` | Rust | Native messaging host. Launches headless Chrome over a pipe, drives the run planner with CDP, and seals results. `install` / `uninstall` subcommands write the host manifest. |
 | `extension/` | TypeScript | MV3 extension: service worker, picker, extractor, popup, dashboard. |
+| `pocket-scraper-runner` (in `crates/native-host`) | Rust | Standalone runner for VMs, servers and desktops: signed recipe bundles in, sealed and signed result batches out, on a timer, optionally through an S3-compatible bucket. See `RUNNER.md`. |
+| `browser/headless-shell.json` | JSON | The pinned Chrome for Testing headless shell (version and SHA-256 per platform) used for every run outside the person's own tabs. |
 
 ### The run planner
 
@@ -98,7 +100,10 @@ The planner carries the rules fixed in Pocket Scraper PR #1:
 | Unlocked secret key | Dashboard page memory (WASM linear memory) | Freed and zeroized on lock, auto-lock and page close. It never reaches the service worker or the native host. Passphrase copies inside WASM are wiped after use; JavaScript strings can't be. |
 | Recipes | `chrome.storage.local` | Clear. They are re-validated by `core` before every run, because storage is never trusted. |
 | Run history | IndexedDB `runs` | Clear: times, status, row counts, warnings and error messages. |
-| Host browser profiles | `<data>/profiles/<salted hash of the origin>` | Owner-only (0700) folders. The salt is per install (0600), so folder names don't reveal the sites. |
+| Host and runner browser profiles | `<data>/profiles/<salted hash of the origin>` | Owner-only (0700) folders. The salt is per install (0600), so folder names don't reveal the sites. |
+| Runner key, trusted vault key, recipes | `<data>/runner/` | Owner-only. Bundles are re-verified against the pinned vault key before every run. |
+| Result batches | Runner `outbox/`, optional bucket, then the extension's IndexedDB | Records are sealed inside each batch, and the batch is signed by the runner. The extension remembers imported batch IDs. |
+| Bucket credentials | Runner `upload.json`, desktop `collector.json` | Owner-only. Write-only key on runners, read-only key on the desktop. |
 
 Scheduled runs work while the vault is locked, because sealing needs only the
 public key. Because keys are random, storage can't tell a repeated row from a new
@@ -142,8 +147,9 @@ Chrome doesn't push other recipes' next runs back, and a recreated alarm resumes
 from the recipe's last run. A recipe never runs twice at once, and at most two
 runs happen at a time.
 
-Runs while Chrome is closed are out of scope for v1. They would need a launchd
-agent that starts the host on its own.
+For runs while Chrome is closed, and on other machines, use a runner (`RUNNER.md`).
+It runs on its own timer (launchd, systemd or Task Scheduler) and doesn't need Chrome
+or the extension.
 
 ## Build
 
