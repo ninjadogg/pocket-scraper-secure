@@ -35,10 +35,10 @@ export async function hostStatus(): Promise<{ installed: boolean; version?: stri
 }
 
 export async function runOnHost(core: Core, recipe: Recipe, vaultHeader: string, runId: string, observedAt: string, runTimeoutMs: number): Promise<RunOutcome> {
-  const header = JSON.parse(vaultHeader) as { publicKey: string; recordSalt: string };
+  const header = JSON.parse(vaultHeader) as { publicKey: string };
   const records: SealedRecord[] = [];
   const reply = (await request(
-    { type: 'run', runId, recipe, publicKey: header.publicKey, recordSalt: header.recordSalt, runTimeoutMs, observedAt },
+    { type: 'run', runId, recipe, publicKey: header.publicKey, runTimeoutMs, observedAt },
     (m, finish) => {
       if (m.runId !== runId && m.type !== 'error') return finish({ type: 'error', message: 'The native host answered for another run.' });
       if (m.type === 'runChunk') {
@@ -50,7 +50,8 @@ export async function runOnHost(core: Core, recipe: Recipe, vaultHeader: string,
         }
       } else finish(m);
     },
-    runTimeoutMs + 15_000
+    // The host kills its browser at runTimeoutMs + 5 s and then answers; wait longer.
+    runTimeoutMs + 30_000
   )) as HostMessage;
   if (reply.type === 'runDone') {
     const warnings = Array.isArray(reply.warnings) ? reply.warnings.filter((w): w is string => typeof w === 'string').slice(0, 101) : [];

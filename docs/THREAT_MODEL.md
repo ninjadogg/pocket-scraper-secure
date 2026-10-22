@@ -16,13 +16,15 @@
 | A2 | Malicious website | Fakes picker messages, or `postMessage`s the extension | Pages can't reach `chrome.runtime` in MV3. The picker runs in the isolated world, and its messages need the session nonce and the original tab ID. |
 | A3 | Any local process (old architecture: the localhost API) | Calls the scraper API, reads results, triggers runs | No listener exists. Native messaging is reachable only by Chrome for the allowed extension ID. CDP uses a private pipe, not a port. |
 | A4 | Another extension | Messages the service worker | `externally_connectable` is absent (no external messaging), and `sender.id` is checked on every message. |
-| A5 | Local attacker who can read the Chrome profile on disk (backups, stolen disk without FileVault, other users with read access) | Reads stored records | Records are sealed. Without the passphrase, an attacker sees ciphertext, record counts and timestamps, and which rows are equal (salted hashes). |
-| A6 | Same attacker | Brute-forces the passphrase | Argon2id (19 MiB, t=2, p=1 per OWASP's floor; raised when the device allows). Passphrases under 12 characters are refused. |
-| A7 | Same attacker | Reads host browser profiles (live sessions) | Owner-only 0700 directories. **Not encrypted.** A session is only as safe as the OS account; this is documented for the user. |
+| A5 | Local attacker who can read the Chrome profile on disk (backups, stolen disk without FileVault, other users with read access) | Reads stored records, or confirms a guessed row | Records are sealed under random keys, with the observation time inside the ciphertext. Without the passphrase, an attacker sees how many records each recipe has, the run history (times, row counts, errors) and the recipes themselves. They can't see contents, and can't test whether a guessed row is stored. |
+| A6 | Same attacker | Brute-forces the passphrase | Argon2id (19 MiB, 2 passes, 1 lane: OWASP's minimum). Passphrases under 12 characters are refused. |
+| A7 | Same attacker | Reads host browser profiles (live sessions) | Owner-only 0700 directories, named by a salted hash. **Not encrypted.** A session is only as safe as the OS account; this is documented for the user. |
 | A8 | Compromised dependency (supply chain) | Malicious code at build or run time | Minimal dependency set. Exact pins, a lockfile with checksums, and a 14-day minimum age. npm `ignore-scripts=true`. No runtime network fetches. The extension bundles everything, and the CSP forbids remote code. |
 | A9 | Someone with access to the unlocked dashboard tab | Reads records | Auto-lock after inactivity (default 10 min). The secret key is only in dashboard memory and is zeroized on lock or close. |
 | A10 | Malicious recipe import | Points runs at `file:`, `chrome:` or internal URLs, or sets abusive limits | `core::recipe` accepts only `http(s)`, caps every field, and requires a host permission granted by the user per origin. |
-| A11 | Memory-safety bugs | Exploit parser or crypto code | Rust core and host. `unsafe` is forbidden in `core`. The host's only `unsafe` is a single `dup2` in `pre_exec` to hand the pipe to Chrome, isolated and commented. |
+| A11 | Memory-safety bugs | Exploit parser or crypto code | Rust core and host. `unsafe` is forbidden in `core` and `core-wasm`. In the host it is denied except in `browser.rs`: `pipe`, `fcntl`, `close`, `File::from_raw_fd` and the `pre_exec` `dup2` that hand Chrome its pipe, plus `kill` (lock check and watchdog). Each block carries a SAFETY comment. |
+| A12 | Local attacker who can **write** the Chrome profile | Replaces the vault's public key so later runs seal to them | Not preventable while runs seal without the passphrase. The same access could also modify an unpacked extension's files. The next unlock fails ("modified"), so the swap is noticed. Profile write access is otherwise out of scope (see below). |
+| A13 | A recipe whose page redirects, or whose clicks lead, to another site | Reads that site with the run's browser session | The planner fails any read whose origin isn't the recipe's own (both drivers). Tab runs are also limited to granted origins by Chrome. |
 
 ## Out of scope
 
@@ -36,6 +38,12 @@
 
 - Host browser profiles hold live logins in the clear. Use dedicated website
   accounts where possible.
-- Record timestamps, counts and equality are visible without the passphrase.
+- Record counts per recipe, the run history and the recipes are visible without
+  the passphrase; record contents and observation times are not.
 - There is no passphrase recovery. Forgetting it loses the stored records,
   though not the recipes.
+- Changing the passphrase doesn't change the key: an old copy of the vault header
+  plus the old passphrase still opens every record. Key rotation isn't built yet:
+  retiring a leaked passphrase means exporting, clearing the extension's data and
+  creating a new vault.
+- Repeat copies of rows build up until you open that recipe's records unlocked.

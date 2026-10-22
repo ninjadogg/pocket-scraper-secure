@@ -22,6 +22,9 @@ pub const RUN_ROWS_MAX: usize = 5_000;
 pub const RUN_BYTES_MAX: usize = 2_000_000;
 /// One extracted value; larger values mean the selector is too broad.
 pub const VALUE_BYTES_MAX: usize = 100_000;
+/// One record (all its values and its page address). Keeps every sealed record well
+/// under the native messaging limit after base64.
+pub const ROW_BYTES_MAX: usize = 512 * 1024;
 /// Warnings one extraction may return, and one run may keep.
 pub const EXTRACT_WARNINGS_MAX: usize = 30;
 pub const RUN_WARNINGS_MAX: usize = 100;

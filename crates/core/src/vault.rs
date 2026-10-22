@@ -58,9 +58,6 @@ pub struct VaultHeader {
     pub version: u8,
     #[serde(with = "b64")]
     pub public_key: Vec<u8>,
-    /// Salt for record keys (see `records::record_key`); not secret.
-    #[serde(with = "b64")]
-    pub record_salt: Vec<u8>,
     pub kdf: KdfParams,
     #[serde(with = "b64")]
     pub kdf_salt: Vec<u8>,
@@ -72,9 +69,6 @@ pub struct VaultHeader {
 impl VaultHeader {
     pub fn public_key(&self) -> Result<[u8; 32], Error> {
         self.public_key.as_slice().try_into().map_err(|_| Error::invalid("Vault public key is malformed"))
-    }
-    pub fn record_salt(&self) -> Result<[u8; 32], Error> {
-        self.record_salt.as_slice().try_into().map_err(|_| Error::invalid("Vault record salt is malformed"))
     }
 }
 
@@ -101,18 +95,20 @@ pub fn check_passphrase(passphrase: &str) -> Result<(), Error> {
 pub fn create(passphrase: &str, kdf: KdfParams) -> Result<(VaultHeader, SecretKey), Error> {
     check_passphrase(passphrase)?;
     let secret = SecretKey(StaticSecret::from(random_bytes::<32>()));
-    let header = wrap(&secret, passphrase, kdf, random_bytes::<32>().to_vec())?;
+    let header = wrap(&secret, passphrase, kdf)?;
     Ok((header, secret))
 }
 
-/// Re-wraps the secret under a new passphrase; records stay readable.
+/// Re-wraps the same secret under a new passphrase; records stay readable. The key
+/// itself does not change, so an old copy of the header still opens with the old
+/// passphrase.
 pub fn change_passphrase(header: &VaultHeader, old: &str, new: &str) -> Result<VaultHeader, Error> {
     check_passphrase(new)?;
     let secret = unlock(header, old)?;
-    wrap(&secret, new, header.kdf, header.record_salt.clone())
+    wrap(&secret, new, header.kdf)
 }
 
-fn wrap(secret: &SecretKey, passphrase: &str, kdf: KdfParams, record_salt: Vec<u8>) -> Result<VaultHeader, Error> {
+fn wrap(secret: &SecretKey, passphrase: &str, kdf: KdfParams) -> Result<VaultHeader, Error> {
     let kdf_salt = random_bytes::<16>().to_vec();
     let public_key = secret.public_key().to_vec();
     let key = derive(passphrase, &kdf_salt, kdf)?;
@@ -125,7 +121,7 @@ fn wrap(secret: &SecretKey, passphrase: &str, kdf: KdfParams, record_salt: Vec<u
     secret_bytes.zeroize();
     let mut wrapped_secret = nonce.to_vec();
     wrapped_secret.extend_from_slice(&ct);
-    Ok(VaultHeader { version: 1, public_key, record_salt, kdf, kdf_salt, wrapped_secret })
+    Ok(VaultHeader { version: 1, public_key, kdf, kdf_salt, wrapped_secret })
 }
 
 /// Unlocks the vault. A wrong passphrase and a tampered header look the same.
@@ -142,8 +138,8 @@ pub fn unlock(header: &VaultHeader, passphrase: &str) -> Result<SecretKey, Error
             .decrypt(&XNonce::from(nonce), Payload { msg: ct, aad: &wrap_aad(&header.public_key) })
             .map_err(|_| Error::Crypto("Wrong passphrase, or the vault was modified"))?,
     );
-    let bytes: [u8; 32] = plain.as_slice().try_into().map_err(|_| Error::Crypto("Vault key is malformed"))?;
-    let secret = SecretKey(StaticSecret::from(bytes));
+    let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(plain.as_slice().try_into().map_err(|_| Error::Crypto("Vault key is malformed"))?);
+    let secret = SecretKey(StaticSecret::from(*bytes));
     if secret.public_key().as_slice() != header.public_key.as_slice() {
         return Err(Error::Crypto("Vault key does not match its public key"));
     }
@@ -282,7 +278,6 @@ mod tests {
         let sealed = seal(&header.public_key().unwrap(), &aad, b"kept").unwrap();
         let changed = change_passphrase(&header, PASS, "a brand new passphrase").unwrap();
         assert_eq!(changed.public_key, header.public_key);
-        assert_eq!(changed.record_salt, header.record_salt);
         assert!(unlock(&changed, PASS).is_err());
         assert_eq!(open(&unlock(&changed, "a brand new passphrase").unwrap(), &aad, &sealed).unwrap(), b"kept");
     }

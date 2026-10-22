@@ -152,7 +152,7 @@ fn recipes_run_in_headless_chrome_over_the_pipe() {
     let (header, _) = vault::create(pass, KdfParams::default()).unwrap();
     let request = serde_json::json!({
         "type": "run", "runId": "run-1", "observedAt": "2026-10-22T12:00:00.000Z", "runTimeoutMs": 60000,
-        "publicKey": serde_json::to_value(&header).unwrap()["publicKey"], "recordSalt": serde_json::to_value(&header).unwrap()["recordSalt"],
+        "publicKey": serde_json::to_value(&header).unwrap()["publicKey"],
         "recipe": { "id": "recipe-1", "name": "list", "url": format!("{base}/list"), "rowSelector": "li.card", "fields": [{ "name": "name", "selector": ".name" }], "nextSelector": "a.next", "maxPages": 2 }
     });
     let responses = handler::handle(request.to_string().as_bytes());
@@ -174,5 +174,21 @@ fn recipes_run_in_headless_chrome_over_the_pipe() {
     assert_eq!(entries.len(), 1);
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(entries[0].metadata().unwrap().permissions().mode() & 0o777, 0o700);
+    for dir in [&data, &profiles] {
+        assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+    }
+    assert_eq!(std::fs::metadata(data.join("profile-salt")).unwrap().permissions().mode() & 0o777, 0o600);
+    // The folder name is salted: it isn't the plain hash of the origin.
+    let unsalted = pocket_scraper_core::url::site_key(b"", &base);
+    assert_ne!(entries[0].file_name().to_string_lossy(), unsalted);
+
+    // A lock left by a killed browser doesn't block the site.
+    let profile_dir = entries[0].path();
+    std::os::unix::fs::symlink("somehost-999999", profile_dir.join("SingletonLock")).unwrap();
+    assert!(!pocket_scraper_host::browser::profile_in_use(&profile_dir), "a dead pid's lock is stale");
+    assert!(std::fs::symlink_metadata(profile_dir.join("SingletonLock")).is_err(), "and is removed");
+    std::os::unix::fs::symlink(format!("somehost-{}", std::process::id()), profile_dir.join("SingletonLock")).unwrap();
+    assert!(pocket_scraper_host::browser::profile_in_use(&profile_dir), "a live pid's lock is respected");
+    std::fs::remove_file(profile_dir.join("SingletonLock")).unwrap();
     let _ = std::fs::remove_dir_all(&data);
 }

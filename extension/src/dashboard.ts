@@ -59,7 +59,8 @@ async function renderVault() {
     const unlock = async () => {
       try {
         say('Unlocking…');
-        vault = core.UnlockedVault.unlock(header, pass.value);
+        // Always the stored header: it may have changed since this form was drawn.
+        vault = core.UnlockedVault.unlock((await store.getVaultHeader()) ?? header, pass.value);
         pass.value = '';
         say('');
         await touch();
@@ -77,7 +78,9 @@ async function renderVault() {
     h('div', { className: 'row' }, h('strong', {}, 'Vault unlocked'), h('button', { className: 'tight', onclick: lock }, 'Lock now')),
     h('details', {}, h('summary', {}, 'Change passphrase'), h('div', { className: 'row' }, oldPass, newPass, h('button', { className: 'tight', onclick: async () => {
       try {
-        await store.setVaultHeader(core.changePassphrase(header, oldPass.value, newPass.value));
+        const current = await store.getVaultHeader();
+        if (!current) throw new Error('The vault is gone.');
+        await store.setVaultHeader(core.changePassphrase(current, oldPass.value, newPass.value));
         oldPass.value = newPass.value = '';
         say('Passphrase changed.');
       } catch (e) { say((e as Error).message, true); }
@@ -138,21 +141,30 @@ async function showRecords(recipeId: string) {
   }
   await touch();
   const stored = await store.listRecords(recipeId);
-  const opened: PlainRecord[] = [];
+  let opened: [string, PlainRecord][] = [];
   let unreadable = 0;
   for (const s of stored) {
-    try { opened.push(JSON.parse(vault.open(recipeId, s.key, s.sealed)) as PlainRecord); }
+    try { opened.push([s.key, JSON.parse(vault.open(recipeId, s.key, s.sealed)) as PlainRecord]); }
     catch { unreadable++; }
   }
-  opened.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+  // Runs store everything they collect (keys are random, so storage can't tell
+  // duplicates apart). Now that the records are open, drop repeat copies.
+  const duplicates = JSON.parse(core.duplicateKeys(JSON.stringify(opened))) as string[];
+  if (duplicates.length) {
+    await store.deleteRecordKeys(recipeId, duplicates);
+    const gone = new Set(duplicates);
+    opened = opened.filter(([key]) => !gone.has(key));
+  }
+  const records = opened.map(([, r]) => r);
+  records.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
   const names = entry.recipe.fields.map(f => f.name);
-  const shown = opened.slice(0, 500);
+  const shown = records.slice(0, 500);
   const safeName = entry.recipe.name.replace(/[^\w.-]+/g, '_').slice(0, 60) || 'records';
   $('records').replaceChildren(
     h('div', { className: 'actions' },
-      h('button', { onclick: () => download(`${safeName}.csv`, 'text/csv', core.toCsv(JSON.stringify(names), JSON.stringify(opened))) }, 'Export CSV'),
-      h('button', { onclick: () => download(`${safeName}.json`, 'application/json', JSON.stringify(opened, null, 2)) }, 'Export JSON')),
-    h('p', { className: 'small' }, `${opened.length} record(s)${opened.length > shown.length ? `, newest ${shown.length} shown` : ''}.`),
+      h('button', { onclick: () => download(`${safeName}.csv`, 'text/csv', core.toCsv(JSON.stringify(names), JSON.stringify(records))) }, 'Export CSV'),
+      h('button', { onclick: () => download(`${safeName}.json`, 'application/json', JSON.stringify(records, null, 2)) }, 'Export JSON')),
+    h('p', { className: 'small' }, `${records.length} record(s)${records.length > shown.length ? `, newest ${shown.length} shown` : ''}${duplicates.length ? `; ${duplicates.length} repeat copies from later runs removed` : ''}.`),
     ...(unreadable ? [h('p', { className: 'message bad' }, `${unreadable} record(s) could not be opened: they were modified or belong to another vault.`)] : []),
     h('div', { className: 'scroll' }, h('table', {},
       h('tr', {}, ...['Observed', ...names, 'Page'].map(t => h('th', {}, t))),
@@ -163,13 +175,13 @@ async function renderRuns() {
   const recipes = await store.getRecipes();
   const runs: RunRecord[] = await store.listRuns(50);
   $('runs').replaceChildren(
-    h('tr', {}, ...['Started', 'Recipe', 'Via', 'Status', 'Rows (new)', 'Details'].map(t => h('th', {}, t))),
+    h('tr', {}, ...['Started', 'Recipe', 'Via', 'Status', 'Rows', 'Details'].map(t => h('th', {}, t))),
     ...runs.map(run => h('tr', {},
       h('td', {}, new Date(run.startedAt).toLocaleString()),
       h('td', {}, recipes[run.recipeId]?.recipe.name ?? '(deleted)'),
       h('td', {}, `${run.via === 'host' ? 'Native host' : 'Tab'}, ${run.trigger}`),
       h('td', { className: `status-${run.status}` }, run.status.replace('_', ' ')),
-      h('td', {}, run.rowCount === undefined ? '' : `${run.rowCount} (${run.newCount ?? 0})`),
+      h('td', {}, run.rowCount ?? ''),
       h('td', {}, run.error ?? '', ...run.warnings.slice(0, 5).map(w => h('div', { className: 'small' }, w)), run.warnings.length > 5 ? h('div', { className: 'small' }, `…${run.warnings.length - 5} more`) : null))));
 }
 

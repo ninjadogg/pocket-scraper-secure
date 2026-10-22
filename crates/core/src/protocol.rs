@@ -3,12 +3,11 @@
 //! host, but neither side trusts the other's input.
 
 use crate::limits::{HOST_MESSAGE_MAX, ID_MAX, RUN_TIMEOUT_MAX_MS};
-use crate::records::{record_key, PlainRecord, Row};
+use crate::records::{new_record_key, PlainRecord, Row};
 use crate::recipe::{Recipe, RecipeInput};
 use crate::vault::{self, b64};
 use crate::Error;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -22,8 +21,6 @@ pub enum Request {
         recipe: RecipeInput,
         #[serde(with = "b64")]
         public_key: Vec<u8>,
-        #[serde(with = "b64")]
-        record_salt: Vec<u8>,
         run_timeout_ms: u64,
         observed_at: String,
     },
@@ -38,7 +35,6 @@ pub struct RunRequest {
     pub run_id: String,
     pub recipe: Recipe,
     pub public_key: [u8; 32],
-    pub record_salt: [u8; 32],
     pub run_timeout_ms: u64,
     pub observed_at: String,
 }
@@ -52,15 +48,14 @@ impl Request {
     }
 }
 
-pub fn validate_run(run_id: String, recipe: RecipeInput, public_key: Vec<u8>, record_salt: Vec<u8>, run_timeout_ms: u64, observed_at: String) -> Result<RunRequest, Error> {
+pub fn validate_run(run_id: String, recipe: RecipeInput, public_key: Vec<u8>, run_timeout_ms: u64, observed_at: String) -> Result<RunRequest, Error> {
     check_id(&run_id)?;
     check_timestamp(&observed_at)?;
     let public_key: [u8; 32] = public_key.try_into().map_err(|_| Error::invalid("Public key must be 32 bytes"))?;
-    let record_salt: [u8; 32] = record_salt.try_into().map_err(|_| Error::invalid("Record salt must be 32 bytes"))?;
     if !(1_000..=RUN_TIMEOUT_MAX_MS).contains(&run_timeout_ms) {
         return Err(Error::invalid("Run timeout is out of range"));
     }
-    Ok(RunRequest { run_id, recipe: Recipe::validate(recipe)?, public_key, record_salt, run_timeout_ms, observed_at })
+    Ok(RunRequest { run_id, recipe: Recipe::validate(recipe)?, public_key, run_timeout_ms, observed_at })
 }
 
 /// Host → extension.
@@ -85,16 +80,12 @@ pub struct SealedRecord {
     pub sealed: Vec<u8>,
 }
 
-/// Seals each distinct row of a run. Rows equal to an earlier row of the same run
-/// share its key and are stored once.
-pub fn seal_rows(public_key: &[u8; 32], record_salt: &[u8; 32], recipe_id: &str, run_id: &str, observed_at: &str, rows: &[Row]) -> Result<Vec<SealedRecord>, Error> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
+/// Seals every row of a run under a fresh random key. Duplicates are removed later,
+/// by `records::duplicates`, once the vault is unlocked.
+pub fn seal_rows(public_key: &[u8; 32], recipe_id: &str, run_id: &str, observed_at: &str, rows: &[Row]) -> Result<Vec<SealedRecord>, Error> {
+    let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let key = record_key(record_salt, recipe_id, row);
-        if !seen.insert(key.clone()) {
-            continue;
-        }
+        let key = new_record_key();
         let plain = PlainRecord { observed_at: observed_at.into(), run_id: run_id.into(), page_url: row.page_url.clone(), fields: row.fields.clone() };
         let json = serde_json::to_vec(&plain).expect("record serialises");
         let sealed = vault::seal(public_key, &vault::record_aad(recipe_id, &key), &json)?;
@@ -147,11 +138,11 @@ mod tests {
     fn run_requests_parse_and_validate() {
         let json = serde_json::json!({
             "type": "run", "runId": "run-1", "observedAt": "2026-10-22T12:00:00.000Z", "runTimeoutMs": 180000,
-            "publicKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "recordSalt": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "publicKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
             "recipe": { "id": "abc", "name": "t", "url": "https://example.org", "fields": [{ "name": "a", "selector": "x" }] }
         });
-        let Request::Run { run_id, recipe, public_key, record_salt, run_timeout_ms, observed_at } = Request::from_json(json.to_string().as_bytes()).unwrap() else { panic!() };
-        let run = validate_run(run_id, recipe, public_key, record_salt, run_timeout_ms, observed_at).unwrap();
+        let Request::Run { run_id, recipe, public_key, run_timeout_ms, observed_at } = Request::from_json(json.to_string().as_bytes()).unwrap() else { panic!() };
+        let run = validate_run(run_id, recipe, public_key, run_timeout_ms, observed_at).unwrap();
         assert_eq!(run.recipe.origin, "https://example.org");
         assert_eq!(run.public_key, [1u8; 32]);
 
@@ -160,18 +151,19 @@ mod tests {
         assert!(Request::from_json(bad.to_string().as_bytes()).is_err(), "unknown fields are refused");
         let mut bad = json.clone();
         bad["recipe"]["url"] = "file:///etc/passwd".into();
-        let Request::Run { run_id, recipe, public_key, record_salt, run_timeout_ms, observed_at } = Request::from_json(bad.to_string().as_bytes()).unwrap() else { panic!() };
-        assert!(validate_run(run_id, recipe, public_key, record_salt, run_timeout_ms, observed_at).is_err());
+        let Request::Run { run_id, recipe, public_key, run_timeout_ms, observed_at } = Request::from_json(bad.to_string().as_bytes()).unwrap() else { panic!() };
+        assert!(validate_run(run_id, recipe, public_key, run_timeout_ms, observed_at).is_err());
         assert!(Request::from_json(&vec![b' '; HOST_MESSAGE_MAX + 1]).is_err());
         assert!(check_id("../x").is_err());
     }
 
     #[test]
-    fn rows_seal_once_per_distinct_row_and_open_with_the_vault() {
+    fn every_row_seals_under_its_own_random_key_and_opens_with_the_vault() {
         let (header, _) = create("correct horse battery", KdfParams::default()).unwrap();
         let row = |v: &str| Row { page_url: "https://example.org/".into(), fields: [("a".to_string(), v.to_string())].into() };
-        let sealed = seal_rows(&header.public_key().unwrap(), &header.record_salt().unwrap(), "recipe", "run-1", "2026-10-22T12:00:00Z", &[row("1"), row("2"), row("1")]).unwrap();
-        assert_eq!(sealed.len(), 2);
+        let sealed = seal_rows(&header.public_key().unwrap(), "recipe", "run-1", "2026-10-22T12:00:00Z", &[row("1"), row("2"), row("1")]).unwrap();
+        assert_eq!(sealed.len(), 3, "repeats are kept");
+        assert_ne!(sealed[0].key, sealed[2].key, "equal rows don't share a key");
         let key = unlock(&header, "correct horse battery").unwrap();
         let plain: PlainRecord = serde_json::from_slice(&open(&key, &record_aad("recipe", &sealed[1].key), &sealed[1].sealed).unwrap()).unwrap();
         assert_eq!(plain.fields["a"], "2");

@@ -1,13 +1,16 @@
 //! WebAssembly bindings for the extension. Values cross the boundary as JSON strings
 //! (validated on the Rust side) or base64; the unlocked vault key never does.
+//! Passphrases are taken by value and wiped from WebAssembly memory after use (the
+//! page's own JavaScript strings can't be wiped).
 
 use pocket_scraper_core::plan::{Action, Observation, Run, RunOptions};
 use pocket_scraper_core::protocol::{seal_rows as seal, SealedRecord};
 use pocket_scraper_core::recipe::Recipe;
-use pocket_scraper_core::records::{PlainRecord, Row};
+use pocket_scraper_core::records::{self, PlainRecord, Row};
 use pocket_scraper_core::vault::{self, KdfParams, SecretKey, VaultHeader};
 use pocket_scraper_core::{csv, limits};
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroize;
 
 fn js(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -71,19 +74,23 @@ fn to_json(action: &Action) -> String {
 
 /// Creates a vault; returns its header JSON. Unlock it to read records.
 #[wasm_bindgen(js_name = createVault)]
-pub fn create_vault(passphrase: &str) -> Result<String, JsError> {
-    let (header, _secret) = vault::create(passphrase, KdfParams::default()).map_err(js)?;
+pub fn create_vault(mut passphrase: String) -> Result<String, JsError> {
+    let result = vault::create(&passphrase, KdfParams::default());
+    passphrase.zeroize();
+    let (header, _secret) = result.map_err(js)?;
     Ok(serde_json::to_string(&header).expect("header serialises"))
 }
 
 #[wasm_bindgen(js_name = changePassphrase)]
-pub fn change_passphrase(header_json: &str, old: &str, new: &str) -> Result<String, JsError> {
-    let header = vault::change_passphrase(&header(header_json)?, old, new).map_err(js)?;
-    Ok(serde_json::to_string(&header).expect("header serialises"))
+pub fn change_passphrase(header_json: &str, mut old: String, mut new: String) -> Result<String, JsError> {
+    let result = header(header_json).and_then(|h| vault::change_passphrase(&h, &old, &new).map_err(js));
+    old.zeroize();
+    new.zeroize();
+    Ok(serde_json::to_string(&result?).expect("header serialises"))
 }
 
-/// Seals a finished run's rows (JSON array) to the vault's public key. Returns a
-/// JSON array of `{ key, sealed }` with `sealed` in base64.
+/// Seals a finished run's rows (JSON array) to the vault's public key, each under a
+/// random key. Returns a JSON array of `{ key, sealed }` with `sealed` in base64.
 #[wasm_bindgen(js_name = sealRows)]
 pub fn seal_rows(header_json: &str, recipe_id: &str, run_id: &str, observed_at: &str, rows_json: &str) -> Result<String, JsError> {
     let header = header(header_json)?;
@@ -93,7 +100,7 @@ pub fn seal_rows(header_json: &str, recipe_id: &str, run_id: &str, observed_at: 
     if rows.len() > limits::RUN_ROWS_MAX {
         return Err(js("Too many rows"));
     }
-    let sealed = seal(&header.public_key().map_err(js)?, &header.record_salt().map_err(js)?, recipe_id, run_id, observed_at, &rows).map_err(js)?;
+    let sealed = seal(&header.public_key().map_err(js)?, recipe_id, run_id, observed_at, &rows).map_err(js)?;
     Ok(serde_json::to_string(&sealed).expect("records serialise"))
 }
 
@@ -117,8 +124,10 @@ pub struct UnlockedVault {
 #[wasm_bindgen]
 impl UnlockedVault {
     /// Slow on purpose (Argon2id). Fails on a wrong passphrase or modified header.
-    pub fn unlock(header_json: &str, passphrase: &str) -> Result<UnlockedVault, JsError> {
-        Ok(UnlockedVault { secret: vault::unlock(&header(header_json)?, passphrase).map_err(js)? })
+    pub fn unlock(header_json: &str, mut passphrase: String) -> Result<UnlockedVault, JsError> {
+        let result = header(header_json).and_then(|h| vault::unlock(&h, &passphrase).map_err(js));
+        passphrase.zeroize();
+        Ok(UnlockedVault { secret: result? })
     }
 
     /// Opens one sealed record (base64); returns its plaintext JSON.
@@ -128,6 +137,14 @@ impl UnlockedVault {
         let record: PlainRecord = serde_json::from_slice(&plain).map_err(|_| js("Record contents are malformed"))?;
         Ok(serde_json::to_string(&record).expect("record serialises"))
     }
+}
+
+/// Given opened records as a JSON array of `[key, record]`, returns the keys of
+/// duplicate copies to delete (see `records::duplicates`).
+#[wasm_bindgen(js_name = duplicateKeys)]
+pub fn duplicate_keys(json: &str) -> Result<String, JsError> {
+    let items: Vec<(String, PlainRecord)> = serde_json::from_str(json).map_err(|e| js(format!("Records are malformed: {e}")))?;
+    Ok(serde_json::to_string(&records::duplicates(&items)).expect("keys serialise"))
 }
 
 /// Spreadsheet-safe CSV from opened records (JSON array) in the recipe's field order.

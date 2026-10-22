@@ -19,21 +19,27 @@ public issues. Test only systems and accounts you own or may test.
   - in the run's memory before sealing;
   - in the unlocked dashboard.
 - **Key handling.** The vault's secret key is never written unwrapped and never
-  leaves the dashboard's WebAssembly memory. It is zeroized on lock.
-- **Untrusted input.** Every boundary input is validated by the Rust core with
-  unknown fields refused: recipes, extractor output, host messages and stored data.
+  leaves the dashboard's WebAssembly memory. It is zeroized on lock. Passphrase
+  copies inside WebAssembly are wiped after use, but the browser's own JavaScript
+  strings can't be.
+- **Untrusted input.** The Rust core validates, with unknown fields refused:
+  recipes (also re-checked from storage before every run), extractor output,
+  planner observations, native host messages and records. Messages between the
+  extension's own pages and its service worker are checked in TypeScript.
 - **No remote code.** Extension pages run under `script-src 'self'
   'wasm-unsafe-eval'` and Trusted Types with no policies.
 - **Dependencies.** Pinned, at least 14 days old when added, with npm install
   scripts disabled (see [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)).
 - **Unsafe code.** `unsafe` is forbidden in the core and the WASM bindings. In the
-  native host it is limited to the documented pipe set-up in
-  `crates/native-host/src/browser.rs`.
+  native host it is limited to `crates/native-host/src/browser.rs`: the pipe
+  hand-off to Chrome and the `kill` calls for the lock check and watchdog.
 
 ## Things to know
 
 - Native host browser profiles hold live website sign-ins, protected by owner-only
   folder permissions, not encryption. Prefer dedicated accounts for scraping.
-- Record counts, timestamps and which rows are equal are visible without the
-  passphrase.
+- Record counts per recipe, run history and recipes are visible without the
+  passphrase; record contents and when each was observed are not.
+- Anyone who can write your Chrome profile can make later runs seal to their own
+  key. You'd notice at the next unlock.
 - A forgotten passphrase cannot be recovered.

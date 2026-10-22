@@ -4,7 +4,6 @@
 
 use crate::cdp::Cdp;
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -46,15 +45,42 @@ pub fn find_chrome() -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
-/// Creates (or tightens) an owner-only directory.
-pub fn private_dir(path: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+pub use crate::paths::private_dir;
+
+/// True while a Chrome process still has the profile open. Chrome's `SingletonLock`
+/// is a symlink to `<host>-<pid>`; a lock left by a crashed or killed browser is
+/// removed so the site isn't blocked forever.
+pub fn profile_in_use(profile: &Path) -> bool {
+    let lock = profile.join("SingletonLock");
+    let Ok(target) = fs::read_link(&lock) else {
+        return fs::symlink_metadata(&lock).is_ok();
+    };
+    let pid = target.to_string_lossy().rsplit('-').next().and_then(|p| p.parse::<i32>().ok());
+    match pid {
+        Some(pid) if pid > 0 && !process_alive(pid) => {
+            for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+                let _ = fs::remove_file(profile.join(name));
+            }
+            false
+        }
+        _ => true,
+    }
 }
 
-/// True while a Chrome window still has the profile open.
-pub fn profile_in_use(profile: &Path) -> bool {
-    fs::symlink_metadata(profile.join("SingletonLock")).is_ok()
+fn process_alive(pid: i32) -> bool {
+    #[allow(unsafe_code)]
+    // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Kills a process by pid (the watchdog uses it on a browser that outlives its run).
+pub fn kill_process(pid: u32) {
+    #[allow(unsafe_code)]
+    // SAFETY: sends SIGKILL to a pid this host spawned and has not yet reaped.
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
 }
 
 pub struct Browser {
@@ -63,6 +89,10 @@ pub struct Browser {
 }
 
 impl Browser {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn launch_headless(chrome: &Path, profile: &Path) -> Result<Browser, String> {
         private_dir(profile).map_err(|e| format!("Could not create the browser profile: {e}"))?;
         if profile_in_use(profile) {
@@ -120,7 +150,7 @@ impl Drop for Browser {
 pub fn open_visible(chrome: &Path, profile: &Path, url: &str) -> Result<(), String> {
     private_dir(profile).map_err(|e| format!("Could not create the browser profile: {e}"))?;
     if profile_in_use(profile) {
-        return Ok(()); // already open
+        return Err("This site's browser is already open: a session window or a run is using it. Close the window or wait for the run, then try again.".into());
     }
     Command::new(chrome)
         .args(COMMON_FLAGS)

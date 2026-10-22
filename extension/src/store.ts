@@ -35,19 +35,21 @@ function result<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** Stores sealed records; returns how many were new for this recipe. */
-export async function addRecords(recipeId: string, runId: string, observedAt: string, records: SealedRecord[]): Promise<number> {
+/** Stores a run's sealed records. Keys are random, so duplicates are only found and
+ * removed after unlocking (see deleteRecordKeys). */
+export async function addRecords(recipeId: string, runId: string, records: SealedRecord[]): Promise<void> {
   const tx = (await db()).transaction('records', 'readwrite');
   const store = tx.objectStore('records');
-  let added = 0;
-  for (const r of records) {
-    const exists = await result(store.getKey([recipeId, r.key]));
-    if (exists !== undefined) continue;
-    store.add({ recipeId, runId, observedAt, key: r.key, sealed: r.sealed } satisfies StoredRecord);
-    added++;
-  }
+  for (const r of records) store.add({ recipeId, runId, key: r.key, sealed: r.sealed } satisfies StoredRecord);
   await done(tx);
-  return added;
+}
+
+export async function deleteRecordKeys(recipeId: string, keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  const tx = (await db()).transaction('records', 'readwrite');
+  const store = tx.objectStore('records');
+  for (const key of keys) store.delete([recipeId, key]);
+  await done(tx);
 }
 
 export async function listRecords(recipeId: string): Promise<StoredRecord[]> {
@@ -87,6 +89,12 @@ export async function putRun(run: RunRecord): Promise<void> {
     });
   }
   await done(tx);
+}
+
+/** When this recipe's newest run started (ms), if any. */
+export async function lastRunStart(recipeId: string): Promise<number | undefined> {
+  const runs = (await listRuns(1000)).filter(r => r.recipeId === recipeId);
+  return runs.length ? Date.parse(runs[0].startedAt) : undefined;
 }
 
 export async function listRuns(limit = 100): Promise<RunRecord[]> {

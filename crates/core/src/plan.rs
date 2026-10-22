@@ -9,6 +9,9 @@
 //!   every row otherwise. Repeated values are real records and are kept.
 //! - An error still present when the wait ends fails the run.
 //! - Selector-health problems are reported once per run; warnings are capped.
+//! - Records only come from the recipe's own origin: a redirect or click that lands
+//!   on another site fails the run (the native host's browser profile is signed in).
+//! - Reaching the row or byte limit stops the run and keeps what was collected.
 
 use crate::limits::*;
 use crate::recipe::{Recipe, Step};
@@ -217,9 +220,13 @@ impl Run {
             (Phase::Probing { page, url_before, deadline, mut last, reading: true, .. }, Event::Read { url, status, output, error, challenge }) => {
                 let label = format!("Page {}", page + 2);
                 check_status(status, &format!("{label}: "))?;
+                if challenge {
+                    return Err(fail(format!("{label}: {}", challenge_message()), true));
+                }
                 let last_error = match (output, error) {
                     (Some(output), _) => {
                         let extraction = output.validate(&self.recipe).map_err(|e| fail(format!("{label}: {e}"), false))?;
+                        self.same_site(&label, &extraction.page_url)?;
                         let current = extraction.signature();
                         let changed = !current.is_empty() && Some(&current) != self.previous.as_ref();
                         if changed && last.as_ref() == Some(&current) {
@@ -230,9 +237,6 @@ impl Run {
                         None
                     }
                     (None, error) => {
-                        if challenge {
-                            return Err(fail(format!("{label}: {}", challenge_message()), true));
-                        }
                         // Mid-navigation or mid-render; keep waiting.
                         last = None;
                         Some(error.unwrap_or_else(|| "The page could not be read".into()))
@@ -277,14 +281,9 @@ impl Run {
         }
         self.visited.insert(url);
         let label = format!("Page {}", page + 1);
-        let current = extraction.signature();
-        // "Load more" keeps earlier records and appends; take only the new ones.
-        let skip = match &self.previous {
-            Some(prev) if prev.len() < current.len() && current[..prev.len()] == prev[..] => prev.len(),
-            _ => 0,
-        };
-        self.record(&label, extraction, skip)?;
-        self.previous = Some(current);
+        if self.record_new(&label, extraction)? {
+            return self.finish();
+        }
         if page + 1 >= self.recipe.max_pages || self.recipe.next_selector.is_empty() {
             return self.finish();
         }
@@ -306,7 +305,9 @@ impl Run {
             (StepStage::Reading, Event::Read { status, output, error, challenge, .. }) => {
                 check_status(status, &format!("{label}: "))?;
                 let extraction = self.extraction(&label, output, error, challenge)?;
-                self.record(&label, extraction, 0)?;
+                if self.record_new(&label, extraction)? {
+                    return self.finish();
+                }
                 self.next_step(cycle, index + 1)
             }
             (stage, event) => Err(fail(format!("Driver reported {} while at {label} ({stage:?})", event.name()), false)),
@@ -335,13 +336,39 @@ impl Run {
         if challenge {
             return Err(fail(format!("{label}: {}", challenge_message()), true));
         }
-        match output {
-            Some(output) => output.validate(&self.recipe).map_err(|e| fail(format!("{label}: {e}"), false)),
-            None => Err(fail(format!("{label}: {}", error.unwrap_or_else(|| "The page could not be read".into())), false)),
+        let extraction = match output {
+            Some(output) => output.validate(&self.recipe).map_err(|e| fail(format!("{label}: {e}"), false))?,
+            None => return Err(fail(format!("{label}: {}", error.unwrap_or_else(|| "The page could not be read".into())), false)),
+        };
+        self.same_site(label, &extraction.page_url)?;
+        Ok(extraction)
+    }
+
+    /// Records only come from the recipe's own origin.
+    fn same_site(&self, label: &str, page_url: &str) -> Result<(), Action> {
+        match crate::url::parse(page_url) {
+            Ok(u) if u.origin == self.recipe.origin => Ok(()),
+            Ok(u) => Err(fail(format!("{label}: the run left {} for {}. Runs only read the recipe's own site.", self.recipe.origin, u.origin), false)),
+            Err(_) => Err(fail(format!("{label}: the run left {}. Runs only read the recipe's own site.", self.recipe.origin), false)),
         }
     }
 
-    fn record(&mut self, label: &str, extraction: Extraction, skip: usize) -> Result<(), Action> {
+    /// Records a page or extract step relative to the previous one ("Load more" keeps
+    /// earlier records and appends; take only the new ones). True when the run's row
+    /// or byte limit was reached and it should stop.
+    fn record_new(&mut self, label: &str, extraction: Extraction) -> Result<bool, Action> {
+        let current = extraction.signature();
+        let skip = match &self.previous {
+            Some(prev) if prev.len() < current.len() && current[..prev.len()] == prev[..] => prev.len(),
+            _ => 0,
+        };
+        let full = self.record(label, extraction, skip);
+        self.previous = Some(current);
+        Ok(full)
+    }
+
+    /// Adds rows; returns true when the limit was reached (rows past it are dropped).
+    fn record(&mut self, label: &str, extraction: Extraction, skip: usize) -> bool {
         self.extractions += 1;
         for field in extraction.empty_fields {
             let entry = self.health.entry(field.name.clone()).or_insert_with(|| Health { field, count: 0, first: label.to_string() });
@@ -353,13 +380,15 @@ impl Run {
             self.warnings.push(format!("{label}: no nonempty records"));
         }
         for row in batch {
-            self.bytes += row.page_url.len() + row.fields.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+            let size = row.page_url.len() + row.fields.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+            if self.rows.len() >= RUN_ROWS_MAX || self.bytes + size > RUN_BYTES_MAX {
+                self.warnings.push(format!("{label}: reached the limit of {RUN_ROWS_MAX} rows or 2 MB per run; stopped and kept what was collected. Narrow the selection to get everything."));
+                return true;
+            }
+            self.bytes += size;
             self.rows.push(row);
         }
-        if self.rows.len() > RUN_ROWS_MAX || self.bytes > RUN_BYTES_MAX {
-            return Err(fail("Run exceeds 5000 rows or 2 MB. Narrow the selection.", false));
-        }
-        Ok(())
+        false
     }
 
     fn finish(&mut self) -> Outcome {

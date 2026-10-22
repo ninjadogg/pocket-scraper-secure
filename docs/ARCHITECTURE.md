@@ -78,28 +78,44 @@ The planner carries the rules fixed in Pocket Scraper PR #1:
 - New rows are taken relative to the previous page only.
 - An error that persists past the deadline fails the run.
 - The overall deadline is cooperative, so the driver closes the tab or browser
-  when it passes.
+  when it passes. In the native host, a watchdog also kills the browser at the
+  deadline plus 5 s.
 - Warnings are capped, and selector health is reported once per run.
+- Records only come from the recipe's own origin. A redirect or click that lands
+  on another site fails the run, which matters because the native host's profile
+  may be signed in.
+- Reaching 5000 rows or 2 MB stops the run and keeps what was collected. One
+  record is capped at 512 KB, so it always fits in a native message.
 
 ### Data at rest
 
 | Data | Where | Protection |
 |---|---|---|
-| Records | IndexedDB `records` | Sealed: ephemeral X25519 → HKDF-SHA256 → XChaCha20-Poly1305. The AAD binds the recipe ID and record key. |
-| Record keys (dedupe) | IndexedDB, clear | SHA-256 over a per-vault random salt and the canonical row. This reveals only that two rows are equal. |
-| Vault secret key | `chrome.storage.local` | Wrapped by XChaCha20-Poly1305 under an Argon2id key derived from the passphrase. |
-| Vault public key, salt | `chrome.storage.local` | Clear. Public by design, so runs can seal while the vault is locked. |
-| Unlocked secret key | Dashboard page memory (WASM linear memory) | Zeroized on lock and on page close. It never reaches the service worker or the native host. |
-| Recipes | `chrome.storage.local` | Clear. They are re-validated by `core` on every load, because storage is never trusted. |
-| Host browser profiles | `~/Library/Application Support/PocketScraperSecure/profiles/<site-key>` | Owner-only (0700). |
+| Records | IndexedDB `records` | Sealed: ephemeral X25519 → HKDF-SHA256 → XChaCha20-Poly1305. The AAD binds the recipe ID and record key. The observation time is inside the ciphertext. |
+| Record keys | IndexedDB, clear | Random, 32 bytes each. They reveal nothing about the contents. |
+| Vault secret key | `chrome.storage.local` (restricted to extension contexts) | Wrapped by XChaCha20-Poly1305 under an Argon2id key (19 MiB, 2 passes) derived from the passphrase. |
+| Vault public key | `chrome.storage.local` | Clear. Public by design, so runs can seal while the vault is locked. |
+| Unlocked secret key | Dashboard page memory (WASM linear memory) | Freed and zeroized on lock, auto-lock and page close. It never reaches the service worker or the native host. Passphrase copies inside WASM are wiped after use; JavaScript strings can't be. |
+| Recipes | `chrome.storage.local` | Clear. They are re-validated by `core` before every run, because storage is never trusted. |
+| Run history | IndexedDB `runs` | Clear: times, status, row counts, warnings and error messages. |
+| Host browser profiles | `<data>/profiles/<salted hash of the origin>` | Owner-only (0700) folders. The salt is per install (0600), so folder names don't reveal the sites. |
 
 Scheduled runs work while the vault is locked, because sealing needs only the
-public key.
+public key. Because keys are random, storage can't tell a repeated row from a new
+one, so every run stores everything it collected. When you open a recipe's records
+in the unlocked dashboard, repeat copies from later runs are deleted
+(`records::duplicates`). A row is kept as many times as it appeared in any one
+run, because repeats on one page are real records.
+
+Changing the passphrase re-wraps the same key. An old copy of the vault header
+(from a backup, for example) still opens with the old passphrase.
 
 ### Trust boundaries and validation
 
-Every message crossing a boundary is parsed by `core::protocol` with
-`deny_unknown_fields` and size caps before anything acts on it:
+The Rust core parses everything it acts on with `deny_unknown_fields` and size
+caps: recipes, extractor output, planner observations, host requests and replies,
+and records. Messages that stay inside the extension (page and picker requests to
+the service worker) are checked in TypeScript as described below.
 
 1. **Page → extractor result.** The extractor runs in the isolated world, but the
    page controls the DOM it reads. Results are capped (rows, fields, bytes) and
@@ -120,6 +136,11 @@ Every message crossing a boundary is parsed by `core::protocol` with
 - If the native host is installed and the recipe opts in, the run happens in
   headless Chrome with the recipe's own profile.
 - Otherwise it runs in an inactive background tab of the user's browser.
+
+Alarms are only created when missing or changed. Saving a recipe or restarting
+Chrome doesn't push other recipes' next runs back, and a recreated alarm resumes
+from the recipe's last run. A recipe never runs twice at once, and at most two
+runs happen at a time.
 
 Runs while Chrome is closed are out of scope for v1. They would need a launchd
 agent that starts the host on its own.

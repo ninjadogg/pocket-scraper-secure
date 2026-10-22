@@ -36,18 +36,23 @@ struct Site {
     empty_fields: Vec<EmptyField>,
     warnings_per_read: usize,
     click_fails: bool,
+    /// From this page index on, the page is on another origin.
+    foreign_from: Option<usize>,
+    /// From this page index on, reads report a verification page that still has rows.
+    challenge_with_rows_from: Option<usize>,
 }
 
 impl Site {
     fn new(pages: Vec<Vec<&'static str>>) -> Site {
-        Site { pages, transients: vec![], page: 0, queue: VecDeque::new(), url_changes: false, next_always: false, url_override: None, status: 200, now: 0, empty_fields: vec![], warnings_per_read: 0, click_fails: false }
+        Site { pages, transients: vec![], page: 0, queue: VecDeque::new(), url_changes: false, next_always: false, url_override: None, status: 200, now: 0, empty_fields: vec![], warnings_per_read: 0, click_fails: false, foreign_from: None, challenge_with_rows_from: None }
     }
     fn url(&self) -> String {
         let page = match self.url_override {
             Some((from, to)) if self.page == from => to,
             _ => self.page,
         };
-        if self.url_changes { format!("https://example.org/list?page={}", page + 1) } else { "https://example.org/list".into() }
+        let host = if self.foreign_from.is_some_and(|f| self.page >= f) { "evil.example" } else { "example.org" };
+        if self.url_changes { format!("https://{host}/list?page={}", page + 1) } else { format!("https://{host}/list") }
     }
     fn frame(&mut self) -> Frame {
         if let Some(f) = self.queue.pop_front() {
@@ -68,7 +73,7 @@ impl Site {
                     empty_fields: self.empty_fields.clone(),
                 }),
                 error: None,
-                challenge: false,
+                challenge: self.challenge_with_rows_from.is_some_and(|f| self.page >= f),
             },
             Error(message) => Event::Read { url, status: self.status, output: None, error: Some(message.into()), challenge: false },
             Challenge => Event::Read { url, status: self.status, output: None, error: Some("verification".into()), challenge: true },
@@ -278,10 +283,43 @@ fn selector_health_is_reported_once_and_warnings_are_capped() {
 }
 
 #[test]
-fn runs_over_5000_rows_fail() {
+fn reaching_the_row_limit_stops_and_keeps_what_was_collected() {
     let mut site = Site::new(vec![vec!["x"; 2600], vec!["y"; 2600], vec!["z"; 10]]);
     let out = drive(recipe(serde_json::json!({ "nextSelector": "#next" })), &mut site, fast());
-    assert_eq!(failure(&out).0, "Run exceeds 5000 rows or 2 MB. Narrow the selection.");
+    assert_eq!(names(&out).len(), 5000);
+    assert_eq!(warnings(&out), ["Page 2: reached the limit of 5000 rows or 2 MB per run; stopped and kept what was collected. Narrow the selection to get everything."]);
+}
+
+#[test]
+fn a_run_that_leaves_the_recipes_site_fails() {
+    // A Next link (or redirect) to another origin.
+    let mut site = Site::new(vec![vec!["A"], vec!["B"]]);
+    site.url_changes = true;
+    site.foreign_from = Some(1);
+    let (message, attention) = failure(&drive(recipe(serde_json::json!({ "nextSelector": "#next" })), &mut site, fast()));
+    assert_eq!(message, "Page 2: the run left https://example.org for https://evil.example. Runs only read the recipe's own site.");
+    assert!(!attention);
+    // Landing elsewhere from the start (a redirect) fails too.
+    let mut site = Site::new(vec![vec!["A"]]);
+    site.foreign_from = Some(0);
+    assert!(failure(&drive(recipe(serde_json::json!({})), &mut site, fast())).0.starts_with("Page 1: the run left"));
+}
+
+#[test]
+fn a_verification_page_that_still_matches_needs_attention() {
+    let mut site = Site::new(vec![vec!["A"], vec!["B"]]);
+    site.challenge_with_rows_from = Some(1);
+    let (message, attention) = failure(&drive(recipe(serde_json::json!({ "nextSelector": "#next" })), &mut site, fast()));
+    assert!(message.starts_with("Page 2: Website is showing browser security verification"), "{message}");
+    assert!(attention);
+}
+
+#[test]
+fn workflow_extracts_of_a_growing_list_take_only_new_rows() {
+    // Load more, then extract, three times: the list grows 1 → 2 → 3 → 4.
+    let mut site = Site::new(vec![vec!["1"], vec!["1", "2"], vec!["1", "2", "3"], vec!["1", "2", "3", "4"]]);
+    let r = recipe(serde_json::json!({ "workflow": { "steps": [{ "type": "extract" }, { "type": "click", "selector": "#more", "waitMs": 0 }], "repeatCount": 4 } }));
+    assert_eq!(names(&drive(r, &mut site, fast())), ["1", "2", "3", "4"]);
 }
 
 #[test]

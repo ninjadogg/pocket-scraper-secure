@@ -310,6 +310,7 @@ dependencies = [
  "pocket-scraper-core",
  "serde_json",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

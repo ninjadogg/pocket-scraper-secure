@@ -131,6 +131,9 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await dash.evaluate(`(() => { const [a, b] = document.querySelectorAll('#vault input'); a.value = b.value = ${JSON.stringify(PASS)}; document.querySelector('#vault button').click(); })()`);
     await waitFor(`chrome.storage.local.get('vault').then(v => Boolean(v.vault))`, 'the vault header');
 
+    // Extension storage is closed to content scripts.
+    assert.deepEqual(await send({ type: 'storageRestricted' }), { restricted: true });
+
     // Extension pages enforce Trusted Types: HTML strings are refused.
     assert.equal(await dash.evaluate(`(() => { try { document.body.insertAdjacentHTML('beforeend', '<b>x</b>'); return 'allowed'; } catch (e) { return e.name; } })()`), 'TypeError');
 
@@ -143,15 +146,14 @@ test('the extension collects, seals, shows and protects records end to end', { t
     assert.equal(first.status, 'success', first.error);
     assert.equal(first.via, 'tab');
     assert.equal(first.rowCount, 6);
-    assert.equal(first.newCount, 6);
-    // A second run stores nothing new.
-    await send({ type: 'runNow', id: saved.id });
-    const second = await waitFor(`${runs}.then(rs => rs.length === 2 && rs.every(r => r.status !== 'running') && rs.find(r => r.id !== ${JSON.stringify(first.id)}))`, 'the second run');
-    assert.equal(second.newCount, 0);
-    // Stored records are ciphertext only.
+    // A second run stores its rows too: random keys mean storage can't spot repeats.
+    assert.deepEqual(await send({ type: 'runNow', id: saved.id }), { ok: true });
+    await waitFor(`${runs}.then(rs => rs.length === 2 && rs.every(r => r.status === 'success'))`, 'the second run');
+    // Stored records are ciphertext under random keys: nothing about the rows shows.
     const stored = await dash.evaluate(records);
-    assert.equal(stored.length, 6);
-    assert.doesNotMatch(JSON.stringify(stored), /Item \d/);
+    assert.equal(stored.length, 12);
+    assert.doesNotMatch(JSON.stringify(stored), /Item \d|observedAt/);
+    assert.equal(new Set(stored.map(r => r.key)).size, 12);
 
     // Unlock in the UI and read the records.
     await dash.evaluate(`location.reload()`);
@@ -163,6 +165,9 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await dash.evaluate(`[...document.querySelectorAll('#recipes button')].find(b => b.textContent === 'Records').click()`);
     const table = await waitFor(`document.querySelector('#records table')?.innerText`, 'the records table');
     for (let i = 1; i <= 6; i++) assert.match(table, new RegExp(`Item ${i}\\b`));
+    // Opening the records removed the second run's repeat copies.
+    assert.match(await dash.evaluate(`document.querySelector('#records').innerText`), /6 record\(s\); 6 repeat copies from later runs removed/);
+    assert.equal((await dash.evaluate(records)).length, 6);
 
     // The picker ignores synthetic clicks and accepts a real one.
     const page = await open(`${base}/list`);
@@ -190,7 +195,6 @@ test('the extension collects, seals, shows and protects records end to end', { t
     assert.equal(viaHost.status, 'success', viaHost.error);
     assert.equal(viaHost.via, 'host');
     assert.equal(viaHost.rowCount, 4);
-    assert.equal(viaHost.newCount, 4);
     await dash.evaluate(`[...document.querySelectorAll('#recipes tr')].find(tr => tr.textContent.includes('Hosted')).querySelector('button:nth-of-type(2)').click()`);
     const hostedTable = await waitFor(`document.querySelector('#recordsTitle').textContent.includes('Hosted') && document.querySelector('#records table')?.innerText`, 'the hosted records');
     for (let i = 3; i <= 6; i++) assert.match(hostedTable, new RegExp(`Item ${i}\\b`));

@@ -17,26 +17,31 @@ export async function runInTab(core: Core, recipe: Recipe, runTimeoutMs: number)
   // Extension API calls keep the service worker alive through long waits.
   const keepAlive = setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000);
   let stopped = false;
-  const deadline = new Promise<Result>(resolve => setTimeout(() => {
-    stopped = true;
-    resolve({ ok: false, message: `Run timed out after ${Math.round(runTimeoutMs / 1000)}s.`, attention: false });
-  }, runTimeoutMs + 5_000));
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<Result>(resolve => {
+    deadlineTimer = setTimeout(() => resolve({ ok: false, message: `Run timed out after ${Math.round(runTimeoutMs / 1000)}s.`, attention: false }), runTimeoutMs + 5_000);
+  });
   const drive = async (): Promise<Result> => {
     let action = JSON.parse(planner.start(performance.now())) as PlanAction;
     for (;;) {
       if (action.type === 'finish') return { ok: true, rows: action.rows, warnings: action.warnings };
       if (action.type === 'fail') return { ok: false, message: action.message, attention: action.attention };
-      if (stopped) return { ok: false, message: 'Run stopped.', attention: false };
       const event = await perform(tabId, recipe, action);
+      // After the deadline the planner is freed and the tab closed: stop quietly.
+      if (stopped) return { ok: false, message: 'Run stopped.', attention: false };
       action = JSON.parse(planner.observe(JSON.stringify({ nowMs: Math.round(performance.now()), event }))) as PlanAction;
     }
   };
+  const driving = drive().catch((error: unknown): Result => ({ ok: false, message: String((error as Error)?.message ?? error), attention: false }));
   try {
-    return await Promise.race([drive(), deadline]);
+    return await Promise.race([driving, deadline]);
   } finally {
     stopped = true;
+    clearTimeout(deadlineTimer);
     clearInterval(keepAlive);
     await chrome.tabs.remove(tabId).catch(() => {});
+    // Let an in-flight step finish before freeing the planner it would report to.
+    await Promise.race([driving, new Promise(r => setTimeout(r, 35_000))]);
     planner.free();
   }
 }
@@ -44,8 +49,10 @@ export async function runInTab(core: Core, recipe: Recipe, runTimeoutMs: number)
 async function perform(tabId: number, recipe: Recipe, action: PlanAction): Promise<PlanEvent> {
   switch (action.type) {
     case 'navigate': {
+      // Listen before navigating, so the new page's 'complete' can't be missed.
+      const isLoaded = loaded(tabId);
       await chrome.tabs.update(tabId, { url: action.url });
-      await loaded(tabId);
+      await isLoaded;
       const [res] = await chrome.scripting.executeScript({ target: { tabId }, func: navigationStatus }).catch(() => [undefined]);
       return { type: 'navigated', status: typeof res?.result === 'number' ? res.result : 0 };
     }
@@ -92,6 +99,7 @@ function accessMessage(error: unknown): string {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+/** Resolves when the tab finishes loading something other than about:blank. */
 function loaded(tabId: number): Promise<void> {
   return new Promise(resolve => {
     const timer = setTimeout(finish, NAVIGATION_TIMEOUT_MS);
@@ -100,8 +108,8 @@ function loaded(tabId: number): Promise<void> {
       chrome.tabs.onUpdated.removeListener(listener);
       resolve();
     }
-    function listener(id: number, info: chrome.tabs.OnUpdatedInfo) {
-      if (id === tabId && info.status === 'complete') finish();
+    function listener(id: number, info: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) {
+      if (id === tabId && info.status === 'complete' && tab.url !== 'about:blank') finish();
     }
     chrome.tabs.onUpdated.addListener(listener);
   });

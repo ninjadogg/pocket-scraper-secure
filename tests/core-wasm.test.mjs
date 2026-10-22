@@ -67,6 +67,12 @@ test('rows sealed with only the public key open after unlocking, and tampering i
   reopened.free();
 });
 
+test('repeat copies from later runs are found once records are open', () => {
+  const rec = (runId, observedAt, v) => ({ observedAt, runId, pageUrl: 'u', fields: { a: v } });
+  const keys = JSON.parse(core.duplicateKeys(JSON.stringify([['k1', rec('r1', '1', 'x')], ['k2', rec('r1', '1', 'x')], ['k3', rec('r2', '2', 'x')], ['k4', rec('r2', '2', 'y')]])));
+  assert.deepEqual(keys, ['k3']);
+});
+
 test('records from the native host are checked before storage', () => {
   assert.throws(() => core.checkSealedRecords(JSON.stringify([{ key: 'not-hex', sealed: 'AA==' }])), /malformed/);
   assert.throws(() => core.checkSealedRecords(JSON.stringify([{ key: 'a'.repeat(64), sealed: 'AA==', extra: 1 }])), /malformed/);

@@ -1,10 +1,8 @@
 //! `install` / `uninstall`: copy the host to a stable private location and register
 //! it with the browsers, allowing only the Pocket Scraper Secure extension.
 
-use crate::browser::private_dir;
-use crate::paths::{self, HOST_NAME};
+use crate::paths::{self, private_dir, HOST_NAME};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// The extension's ID, fixed by the public key in its manifest.
@@ -49,21 +47,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// Writes `content` to `path` via a temporary file, refusing to follow a symlink.
 fn write_file(path: &Path, content: &[u8], mode: u32) -> Result<(), String> {
-    if fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        return Err(format!("Refusing to replace symlink {}", path.display()));
-    }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    fs::write(&tmp, content).and_then(|_| fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))).and_then(|_| fs::rename(&tmp, path)).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Could not write {}: {e}", path.display())
-    })
+    paths::write_private(path, content, mode).map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
 pub fn install(args: &[String]) -> Result<(), String> {
     let o = parse(args)?;
     let bin = paths::installed_binary();
+    private_dir(&paths::data_dir()).map_err(|e| e.to_string())?;
     private_dir(bin.parent().expect("bin dir")).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let bytes = fs::read(&exe).map_err(|e| format!("Could not read {}: {e}", exe.display()))?;

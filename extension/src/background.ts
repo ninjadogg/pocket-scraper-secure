@@ -8,34 +8,66 @@ import type { Draft, FieldKind, PageRequest, PickMessage, PickMode, Recipe, Reci
 
 const MAX_CONCURRENT_RUNS = 2;
 const ALARM_PREFIX = 'recipe:';
+/** Recipes with a run in progress. Reserved synchronously, before any await. */
 const running = new Set<string>();
+
+// Keep extension storage away from content scripts (they run in web page processes).
+// Every service-worker start, not only install: the setting is not guaranteed to stick.
+const restricted = Promise.all([chrome.storage.local, chrome.storage.session].map(area =>
+  area.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).then(() => true, (error: unknown) => {
+    console.error('Could not restrict storage access:', error);
+    return false;
+  })));
 
 chrome.runtime.onInstalled.addListener(() => void setup());
 chrome.runtime.onStartup.addListener(() => void setup());
 
 async function setup() {
-  // Keep extension storage away from content scripts (they run in web page processes).
-  for (const area of [chrome.storage.local, chrome.storage.session]) {
-    await area.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
-  }
   await store.closeStaleRuns();
   await syncAlarms();
 }
 
+/** Serialises every change to the recipes map, so concurrent updates can't undo each other. */
+let recipeQueue: Promise<unknown> = Promise.resolve();
+function mutateRecipes<T>(change: (recipes: Record<string, RecipeEntry>) => T | Promise<T>): Promise<T> {
+  const next = recipeQueue.then(async () => {
+    const recipes = await store.getRecipes();
+    const result = await change(recipes);
+    await store.setRecipes(recipes);
+    return result;
+  });
+  recipeQueue = next.catch(() => {});
+  return next;
+}
+
+/**
+ * Creates alarms that are missing or whose period changed, and removes alarms of
+ * deleted or unscheduled recipes. Existing alarms are left alone, so saving one
+ * recipe or restarting Chrome never pushes the others' next run back. A recreated
+ * alarm resumes from the recipe's last run.
+ */
 async function syncAlarms() {
   const recipes = await store.getRecipes();
-  for (const alarm of await chrome.alarms.getAll()) {
-    if (alarm.name.startsWith(ALARM_PREFIX)) await chrome.alarms.clear(alarm.name);
-  }
+  const alarms = new Map((await chrome.alarms.getAll()).filter(a => a.name.startsWith(ALARM_PREFIX)).map(a => [a.name, a]));
   for (const { recipe } of Object.values(recipes)) {
-    if (recipe.scheduleMinutes > 0) {
-      await chrome.alarms.create(ALARM_PREFIX + recipe.id, { delayInMinutes: recipe.scheduleMinutes, periodInMinutes: recipe.scheduleMinutes });
+    const name = ALARM_PREFIX + recipe.id;
+    const existing = alarms.get(name);
+    alarms.delete(name);
+    if (!recipe.scheduleMinutes) {
+      if (existing) await chrome.alarms.clear(name);
+      continue;
     }
+    if (existing?.periodInMinutes === recipe.scheduleMinutes) continue;
+    const period = recipe.scheduleMinutes * 60_000;
+    const last = await store.lastRunStart(recipe.id);
+    const when = Math.max(Date.now() + 60_000, last === undefined ? Date.now() + period : last + period);
+    await chrome.alarms.create(name, { when, periodInMinutes: recipe.scheduleMinutes });
   }
+  for (const orphan of alarms.keys()) await chrome.alarms.clear(orphan);
 }
 
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name.startsWith(ALARM_PREFIX)) void runRecipe(alarm.name.slice(ALARM_PREFIX.length), 'schedule').catch(() => {});
+  if (alarm.name.startsWith(ALARM_PREFIX)) void startRun(alarm.name.slice(ALARM_PREFIX.length), 'schedule');
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -54,33 +86,32 @@ async function handlePage(m: PageRequest): Promise<unknown> {
     case 'saveRecipe':
       return saveRecipe(m.recipe);
     case 'deleteRecipe': {
-      const recipes = await store.getRecipes();
-      delete recipes[m.id];
-      await store.setRecipes(recipes);
+      await mutateRecipes(recipes => { delete recipes[m.id]; });
       if (m.purgeRecords === true) await store.deleteRecords(m.id);
       await syncAlarms();
       return { ok: true };
     }
     case 'runNow': {
-      // Answer at once; the run's progress shows in the dashboard's run list.
-      const problem = await runBlocker(m.id, 'manual');
+      // Answer once the run has started; progress shows in the dashboard's run list.
+      const problem = await startRun(m.id, 'manual');
       if (problem) throw new Error(problem);
-      void runRecipe(m.id, 'manual').catch(() => {});
       return { ok: true };
     }
     case 'hostStatus':
       return hostStatus();
+    case 'storageRestricted':
+      return { restricted: (await restricted).every(Boolean) };
     case 'session': {
       const entry = (await store.getRecipes())[m.id];
       if (!entry) throw new Error('Unknown recipe');
       const result = await sessionCommand(m.action, entry.recipe.url);
-      if (result.ok && m.action === 'close') await clearAttention(entry.recipe.url);
+      if (result.ok && m.action === 'close') await setAttention(entry.recipe.url, false);
       return result;
     }
     case 'clearAttention': {
       const entry = (await store.getRecipes())[m.id];
       if (!entry) throw new Error('Unknown recipe');
-      await clearAttention(entry.recipe.url);
+      await setAttention(entry.recipe.url, false);
       return { ok: true };
     }
     default:
@@ -96,42 +127,51 @@ async function saveRecipe(input: unknown): Promise<Recipe> {
   if (!(await chrome.permissions.contains({ origins: [origin + '/*'] }))) {
     throw new Error(`Allow Pocket Scraper Secure to access ${origin} first.`);
   }
-  const recipes = await store.getRecipes();
-  const now = new Date().toISOString();
-  const previous = recipes[recipe.id];
-  recipes[recipe.id] = { recipe, createdAt: previous?.createdAt ?? now, updatedAt: now, needsAttention: previous?.needsAttention ?? false };
-  await store.setRecipes(recipes);
+  await mutateRecipes(recipes => {
+    const now = new Date().toISOString();
+    const previous = recipes[recipe.id];
+    recipes[recipe.id] = { recipe, createdAt: previous?.createdAt ?? now, updatedAt: now, needsAttention: previous?.needsAttention ?? false };
+  });
   await syncAlarms();
   return recipe;
 }
 
-async function clearAttention(url: string) {
+async function setAttention(url: string, needsAttention: boolean) {
   const origin = new URL(url).origin;
-  const recipes = await store.getRecipes();
-  for (const entry of Object.values(recipes)) if (new URL(entry.recipe.url).origin === origin) entry.needsAttention = false;
-  await store.setRecipes(recipes);
+  await mutateRecipes(recipes => {
+    for (const entry of Object.values(recipes)) if (new URL(entry.recipe.url).origin === origin) entry.needsAttention = needsAttention;
+  });
 }
 
-/** Why a run can't start now, or undefined. */
-async function runBlocker(id: string, trigger: RunRecord['trigger']): Promise<string | undefined> {
-  const entry = (await store.getRecipes())[id];
-  if (!entry) return 'Unknown recipe';
-  if (!(await store.getVaultHeader())) return 'Set up the vault in the dashboard first: results are only ever stored encrypted.';
+/**
+ * Starts a run unless something prevents it; returns the reason, or undefined once
+ * the run is under way. The slot is reserved before the first await, so a click
+ * racing an alarm can't start the same recipe twice or exceed the limit.
+ */
+async function startRun(id: string, trigger: RunRecord['trigger']): Promise<string | undefined> {
   if (running.has(id)) return 'This recipe is already running.';
   if (running.size >= MAX_CONCURRENT_RUNS) return 'Too many runs in progress. Wait for one to finish.';
-  if (entry.needsAttention && trigger === 'schedule') return 'Paused: the site needs attention.';
-  return undefined;
+  running.add(id);
+  let started = false;
+  try {
+    const entry = (await store.getRecipes())[id];
+    if (!entry) return 'Unknown recipe';
+    const header = await store.getVaultHeader();
+    if (!header) return 'Set up the vault in the dashboard first: results are only ever stored encrypted.';
+    if (entry.needsAttention && trigger === 'schedule') return 'Paused: the site needs attention.';
+    started = true;
+    void runRecipe(entry, header, trigger).finally(() => running.delete(id));
+    return undefined;
+  } finally {
+    if (!started) running.delete(id);
+  }
 }
 
-async function runRecipe(id: string, trigger: RunRecord['trigger']): Promise<void> {
-  if (await runBlocker(id, trigger)) return;
-  const entry = (await store.getRecipes())[id] as RecipeEntry;
-  const header = (await store.getVaultHeader()) as string;
-  const core = await loadCore();
-  running.add(id);
-  const run: RunRecord = { id: crypto.randomUUID(), recipeId: id, via: entry.recipe.useNativeHost ? 'host' : 'tab', trigger, startedAt: new Date().toISOString(), status: 'running', warnings: [] };
+async function runRecipe(entry: RecipeEntry, header: string, trigger: RunRecord['trigger']): Promise<void> {
+  const run: RunRecord = { id: crypto.randomUUID(), recipeId: entry.recipe.id, via: entry.recipe.useNativeHost ? 'host' : 'tab', trigger, startedAt: new Date().toISOString(), status: 'running', warnings: [] };
   try {
     await store.putRun(run);
+    const core = await loadCore();
     // Storage is not trusted: re-validate the recipe and re-check site access.
     const json = JSON.stringify(entry.recipe);
     const recipe = JSON.parse(core.validateRecipe(json)) as Recipe;
@@ -149,24 +189,19 @@ async function runRecipe(id: string, trigger: RunRecord['trigger']): Promise<voi
         : result;
     }
     if (outcome.ok) {
-      run.newCount = await store.addRecords(recipe.id, run.id, observedAt, outcome.records);
+      await store.addRecords(recipe.id, run.id, outcome.records);
       run.rowCount = outcome.rowCount;
       run.warnings = outcome.warnings;
       run.status = 'success';
     } else {
       run.status = outcome.attention ? 'needs_attention' : 'error';
       run.error = outcome.message;
-      if (outcome.attention) {
-        const recipes = await store.getRecipes();
-        for (const e of Object.values(recipes)) if (new URL(e.recipe.url).origin === origin) e.needsAttention = true;
-        await store.setRecipes(recipes);
-      }
+      if (outcome.attention) await setAttention(recipe.url, true);
     }
   } catch (error) {
     run.status = 'error';
     run.error = String((error as Error)?.message ?? error);
   } finally {
-    running.delete(id);
     run.finishedAt = new Date().toISOString();
     await store.putRun(run).catch(() => {});
   }

@@ -61,9 +61,13 @@ fn split_port(authority: &str) -> Result<(&str, Option<u16>), Error> {
     }
 }
 
-/// The folder name for a site's browser profile: a hash, so origins never become paths.
-pub fn site_key(origin: &str) -> String {
-    crate::hex(&Sha256::digest(origin.as_bytes()))
+/// The folder name for a site's browser profile: a salted hash, so origins never
+/// become paths and a folder listing doesn't reveal which sites are scraped.
+pub fn site_key(salt: &[u8], origin: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(salt);
+    h.update(origin.as_bytes());
+    crate::hex(&h.finalize())
 }
 
 #[cfg(test)]
@@ -91,9 +95,10 @@ mod tests {
 
     #[test]
     fn site_keys_are_hex_hashes_of_the_origin() {
-        let k = site_key("https://example.org");
+        let k = site_key(b"salt", "https://example.org");
         assert_eq!(k.len(), 64);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(k, site_key("https://example.com"));
+        assert_ne!(k, site_key(b"salt", "https://example.com"));
+        assert_ne!(k, site_key(b"other", "https://example.org"));
     }
 }

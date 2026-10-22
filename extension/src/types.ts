@@ -49,13 +49,13 @@ export interface RunRecord {
   finishedAt?: string;
   status: RunStatus;
   rowCount?: number;
-  newCount?: number;
   warnings: string[];
   error?: string;
 }
 
 export interface SealedRecord { key: string; sealed: string }
-export interface StoredRecord extends SealedRecord { recipeId: string; runId: string; observedAt: string }
+/** Stored as-is: a random key and ciphertext. When it was observed is inside the ciphertext. */
+export interface StoredRecord extends SealedRecord { recipeId: string; runId: string }
 export interface PlainRecord { observedAt: string; runId: string; pageUrl: string; fields: Record<string, string> }
 export interface Row { pageUrl: string; fields: Record<string, string> }
 
@@ -90,6 +90,7 @@ export type PageRequest =
   | { type: 'deleteRecipe'; id: string; purgeRecords: boolean }
   | { type: 'runNow'; id: string }
   | { type: 'hostStatus' }
+  | { type: 'storageRestricted' }
   | { type: 'session'; id: string; action: 'open' | 'close' }
   | { type: 'clearAttention'; id: string };
 
