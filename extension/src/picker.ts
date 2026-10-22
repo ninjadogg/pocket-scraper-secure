@@ -45,23 +45,45 @@ g.__pssPicker = (options: PickerOptions) => {
     }
     const single = choices.find(s => count(s) === 1);
     if (single) return single;
+    // A path up the tree, naming each step by tag and stable classes (position only
+    // when siblings would otherwise match too). For a single target it stops at the
+    // first unique path, so "Next" becomes "li.next > a" rather than a position
+    // that points at "Previous" on the next page.
     const parts: string[] = [];
     for (let node: Element | null = el; node && node !== root && parts.length < 12; node = node.parentElement) {
       if (node.id && stable(node.id)) {
         parts.unshift(`#${esc(node.id)}`);
         break;
       }
-      const same = [...(node.parentElement?.children ?? [])].filter(s => s.tagName === node!.tagName);
-      parts.unshift(node.tagName.toLowerCase() + (same.length > 1 ? `:nth-of-type(${same.indexOf(node) + 1})` : ''));
+      let step = node.tagName.toLowerCase() + [...node.classList].filter(stable).slice(0, 3).map(c => `.${esc(c)}`).join('');
+      const siblings = [...(node.parentElement?.children ?? [])];
+      if (siblings.filter(s => s.matches(step)).length > 1) {
+        step += `:nth-of-type(${siblings.filter(s => s.tagName === node!.tagName).indexOf(node) + 1})`;
+      }
+      parts.unshift(step);
+      if (unique && count(parts.join(' > ')) === 1) break;
     }
     return parts.join(' > ');
+  }
+
+  // A record container is the nearest element around the click that repeats on the
+  // page (same tag and classes as another element) and holds several parts, like a
+  // card. Semantic list and table items still win when they come first.
+  function containerOf(el: Element): Element {
+    const semantic = el.closest('article,li,tr');
+    for (let node: Element | null = el; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      if (node === semantic) return node;
+      const signature = node.tagName.toLowerCase() + [...node.classList].filter(stable).map(c => `.${CSS.escape(c)}`).join('');
+      if (node.children.length >= 2 && count(signature) >= 2) return node;
+    }
+    return semantic ?? el;
   }
 
   function targetOf(e: Event): Element | null {
     const target = e.target;
     if (!(target instanceof Element) || target === host) return null;
     let t: Element = target;
-    if (mode === 'row') return t.closest('article,li,tr') ?? t;
+    if (mode === 'row') return containerOf(t);
     if (kind === 'href') t = t.closest('a[href]') ?? t;
     if (mode === 'action' || mode === 'next') t = t.closest('a,button,[role="button"],input[type="submit"]') ?? t;
     return t;

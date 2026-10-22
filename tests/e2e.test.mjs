@@ -28,10 +28,14 @@ function findBrowser() {
 
 function site() {
   const list = n => `<title>List ${n}</title><ul>${[1, 2].map(i => `<li class="card"><span class="name">Item ${(n - 1) * 2 + i}</span></li>`).join('')}</ul>${n < 3 ? `<a class="next" href="/list?page=${n + 1}">Next</a>` : ''}`;
+  // Cards built from plain divs, like quotes.toscrape.com.
+  const cards = '<title>Cards</title>' + [1, 2, 3].map(i => `<div class="quote"><span class="text">Quote ${i}</span><small class="author">Author ${i}</small></div>`).join('')
+    + '<nav><ul class="pager"><li class="previous"><a href="#">Previous</a></li><li class="next"><a href="#">Next</a></li></ul></nav>';
   const server = createServer((req, res) => {
-    const n = Number(new URL(req.url, 'http://x').searchParams.get('page') || 1);
+    const url = new URL(req.url, 'http://x');
+    const n = Number(url.searchParams.get('page') || 1);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(list(n));
+    res.end(url.pathname === '/cards' ? cards : list(n));
   });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -184,6 +188,24 @@ test('the extension collects, seals, shows and protects records end to end', { t
     assert.deepEqual(draft.fields, [{ name: 'title', selector: 'span.name', kind: 'text' }]);
     assert.match(draft.lastPick, /\(2 matches\)/);
     assert.equal(await page.evaluate(`document.querySelector('pss-picker')`), null, 'the picker removed itself');
+
+    // Picking a record container on plain-div cards climbs from the clicked text to the card.
+    const cardPage = await open(`${base}/cards`);
+    const cardTab = await dash.evaluate(`chrome.tabs.query({ url: ${JSON.stringify(`${base}/cards`)} }).then(t => t[0].id)`);
+    assert.deepEqual(await send({ type: 'startPicker', tabId: cardTab, mode: 'row', fieldName: '', kind: 'text' }), { ok: true });
+    const text = await cardPage.evaluate(`(() => { const r = document.querySelector('.text').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await call('Input.dispatchMouseEvent', { type, x: text.x, y: text.y, button: 'left', clickCount: 1 }, cardPage.sessionId);
+    }
+    assert.equal(await waitFor(`chrome.storage.local.get('draft').then(d => d.draft?.rowSelector)`, 'the picked container', 10_000), 'div.quote');
+    // A Next link without classes of its own is named by its classed parent, not by
+    // position (which would point at "Previous" once that appears).
+    assert.deepEqual(await send({ type: 'startPicker', tabId: cardTab, mode: 'next', fieldName: '', kind: 'text' }), { ok: true });
+    const next = await cardPage.evaluate(`(() => { const r = document.querySelector('li.next a').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await call('Input.dispatchMouseEvent', { type, x: next.x, y: next.y, button: 'left', clickCount: 1 }, cardPage.sessionId);
+    }
+    assert.equal(await waitFor(`chrome.storage.local.get('draft').then(d => d.draft?.nextSelector)`, 'the picked Next button', 10_000), 'li.next > a');
 
     // A run through the native host: sealed in the host, stored by the extension.
     const host = await send({ type: 'hostStatus' });
