@@ -38,7 +38,11 @@ g.__pssPicker = (options: PickerOptions) => {
     const choices: string[] = [];
     for (let n = Math.min(3, classes.length); n >= 1; n--) choices.push(tag + classes.slice(0, n).map(c => `.${esc(c)}`).join(''));
     choices.push(tag);
-    if (!unique) {
+    if (!unique && root !== document) {
+      // A field inside a record: its own classes say what it is, and further matches
+      // in the record are its other values (tags), not lookalikes (another span).
+      if (classes.length) return choices[0];
+    } else if (!unique) {
       const repeated = choices.find(s => count(s) >= 2 && count(s) <= 300);
       if (repeated) return repeated;
       if (el.id && stable(el.id)) return `#${esc(el.id)}`;
@@ -82,6 +86,8 @@ g.__pssPicker = (options: PickerOptions) => {
   function targetOf(e: Event): Element | null {
     const target = e.target;
     if (!(target instanceof Element) || target === host) return null;
+    // The page background is never a useful pick.
+    if (target === document.documentElement || target === document.body) return null;
     let t: Element = target;
     if (mode === 'row') return containerOf(t);
     if (kind === 'href') t = t.closest('a[href]') ?? t;
@@ -102,7 +108,13 @@ g.__pssPicker = (options: PickerOptions) => {
     // Synthetic clicks from page scripts are ignored.
     if (!e.isTrusted) return;
     const el = targetOf(e);
-    if (!el) return;
+    if (!el) {
+      if (e.target === document.documentElement || e.target === document.body) {
+        e.preventDefault();
+        banner.textContent = 'That is the page background. Click the element itself.';
+      }
+      return;
+    }
     e.preventDefault();
     e.stopImmediatePropagation();
     if (mode === 'field' && rowSelector) {

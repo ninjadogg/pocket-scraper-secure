@@ -29,7 +29,7 @@ function findBrowser() {
 function site() {
   const list = n => `<title>List ${n}</title><ul>${[1, 2].map(i => `<li class="card"><span class="name">Item ${(n - 1) * 2 + i}</span></li>`).join('')}</ul>${n < 3 ? `<a class="next" href="/list?page=${n + 1}">Next</a>` : ''}`;
   // Cards built from plain divs, like quotes.toscrape.com.
-  const cards = '<title>Cards</title>' + [1, 2, 3].map(i => `<div class="quote"><span class="text">Quote ${i}</span><small class="author">Author ${i}</small></div>`).join('')
+  const cards = '<title>Cards</title>' + [1, 2, 3].map(i => `<div class="quote"><span class="text">Quote ${i}</span><span>by <small class="author">Author ${i}</small></span></div>`).join('')
     + '<nav><ul class="pager"><li class="previous"><a href="#">Previous</a></li><li class="next"><a href="#">Next</a></li></ul></nav>';
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -198,6 +198,13 @@ test('the extension collects, seals, shows and protects records end to end', { t
       await call('Input.dispatchMouseEvent', { type, x: text.x, y: text.y, button: 'left', clickCount: 1 }, cardPage.sessionId);
     }
     assert.equal(await waitFor(`chrome.storage.local.get('draft').then(d => d.draft?.rowSelector)`, 'the picked container', 10_000), 'div.quote');
+    // A field inside the card is named by its own class, not by a tag that also
+    // matches the card's other span.
+    assert.deepEqual(await send({ type: 'startPicker', tabId: cardTab, mode: 'field', fieldName: 'quote', kind: 'text' }), { ok: true });
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await call('Input.dispatchMouseEvent', { type, x: text.x, y: text.y, button: 'left', clickCount: 1 }, cardPage.sessionId);
+    }
+    assert.equal(await waitFor(`chrome.storage.local.get('draft').then(d => d.draft?.fields?.find(f => f.name === 'quote')?.selector)`, 'the picked quote field', 10_000), 'span.text');
     // A Next link without classes of its own is named by its classed parent, not by
     // position (which would point at "Previous" once that appears).
     assert.deepEqual(await send({ type: 'startPicker', tabId: cardTab, mode: 'next', fieldName: '', kind: 'text' }), { ok: true });
