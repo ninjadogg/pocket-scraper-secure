@@ -127,9 +127,9 @@ agent that starts the host on its own.
 ## Build
 
 ```
-npm run build        # cargo build core-wasm → wasm-bindgen → esbuild → extension/dist
-npm test             # cargo test --workspace, tsc --noEmit, node tests
-cargo run -p pocket-scraper-host -- install --browser chrome
+npm run build        # rustup wasm32 build → wasm-bindgen → esbuild → extension/dist
+npm test             # cargo tests (incl. headless Chrome), tsc, WASM + extension end-to-end
+cargo run --release -p pocket-scraper-host -- install --browser chrome
 ```
 
 Dependencies are pinned. npm runs with `ignore-scripts=true`, and every locked
