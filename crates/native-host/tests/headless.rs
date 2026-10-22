@@ -178,23 +178,33 @@ fn recipes_run_in_headless_chrome_over_the_pipe() {
     let profiles = data.join("profiles");
     let entries: Vec<_> = std::fs::read_dir(&profiles).unwrap().flatten().collect();
     assert_eq!(entries.len(), 1);
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(entries[0].metadata().unwrap().permissions().mode() & 0o777, 0o700);
-    for dir in [&data, &profiles] {
-        assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
-    }
-    assert_eq!(std::fs::metadata(data.join("profile-salt")).unwrap().permissions().mode() & 0o777, 0o600);
     // The folder name is salted: it isn't the plain hash of the origin.
     let unsalted = pocket_scraper_core::url::site_key(b"", &base);
     assert_ne!(entries[0].file_name().to_string_lossy(), unsalted);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(entries[0].metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        for dir in [&data, &profiles] {
+            assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+        }
+        assert_eq!(std::fs::metadata(data.join("profile-salt")).unwrap().permissions().mode() & 0o777, 0o600);
 
-    // A lock left by a killed browser doesn't block the site.
-    let profile_dir = entries[0].path();
-    std::os::unix::fs::symlink("somehost-999999", profile_dir.join("SingletonLock")).unwrap();
-    assert!(!pocket_scraper_host::browser::profile_in_use(&profile_dir), "a dead pid's lock is stale");
-    assert!(std::fs::symlink_metadata(profile_dir.join("SingletonLock")).is_err(), "and is removed");
-    std::os::unix::fs::symlink(format!("somehost-{}", std::process::id()), profile_dir.join("SingletonLock")).unwrap();
-    assert!(pocket_scraper_host::browser::profile_in_use(&profile_dir), "a live pid's lock is respected");
-    std::fs::remove_file(profile_dir.join("SingletonLock")).unwrap();
+        // A lock left by a killed browser doesn't block the site.
+        let profile_dir = entries[0].path();
+        std::os::unix::fs::symlink("somehost-999999", profile_dir.join("SingletonLock")).unwrap();
+        assert!(!pocket_scraper_host::browser::profile_in_use(&profile_dir), "a dead pid's lock is stale");
+        assert!(std::fs::symlink_metadata(profile_dir.join("SingletonLock")).is_err(), "and is removed");
+        std::os::unix::fs::symlink(format!("somehost-{}", std::process::id()), profile_dir.join("SingletonLock")).unwrap();
+        assert!(pocket_scraper_host::browser::profile_in_use(&profile_dir), "a live pid's lock is respected");
+        std::fs::remove_file(profile_dir.join("SingletonLock")).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // A leftover lockfile nobody holds open is stale and cleared.
+        let profile_dir = entries[0].path();
+        std::fs::write(profile_dir.join("lockfile"), b"").unwrap();
+        assert!(!pocket_scraper_host::browser::profile_in_use(&profile_dir));
+    }
     let _ = std::fs::remove_dir_all(&data);
 }

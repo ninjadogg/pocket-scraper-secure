@@ -70,13 +70,21 @@ pub fn install(args: &[String]) -> Result<(), String> {
     let manifest = serde_json::to_vec_pretty(&manifest).expect("manifest serialises");
     for browser in &o.browsers {
         let dir = paths::manifest_dir(browser).expect("checked");
-        if !dir.parent().is_some_and(Path::exists) {
+        if !cfg!(windows) && !dir.parent().is_some_and(Path::exists) {
             eprintln!("Skipped {browser}: it doesn't look installed ({} is missing).", dir.parent().unwrap().display());
             continue;
         }
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(format!("{HOST_NAME}.json"));
         write_file(&path, &manifest, 0o644)?;
+        if cfg!(windows) {
+            // Windows browsers find hosts through the registry.
+            let key = paths::registry_key(browser).expect("checked");
+            let ok = std::process::Command::new("reg").args(["add", &key, "/ve", "/t", "REG_SZ", "/d"]).arg(&path).arg("/f").status().map_err(|e| e.to_string())?;
+            if !ok.success() {
+                return Err(format!("Could not register with {browser} (reg add {key})"));
+            }
+        }
         eprintln!("Registered with {browser}: {}", path.display());
     }
     eprintln!("Installed {} (allowed extension {}).", bin.display(), o.extension_id);
@@ -91,6 +99,9 @@ pub fn uninstall(args: &[String]) -> Result<(), String> {
         let path = paths::manifest_dir(browser).expect("known").join(format!("{HOST_NAME}.json"));
         if fs::symlink_metadata(&path).is_ok() {
             fs::remove_file(&path).map_err(|e| e.to_string())?;
+            if cfg!(windows) {
+                let _ = std::process::Command::new("reg").args(["delete", &paths::registry_key(browser).expect("known"), "/f"]).status();
+            }
             eprintln!("Unregistered from {browser}.");
         }
     }

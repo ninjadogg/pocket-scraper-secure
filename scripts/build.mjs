@@ -17,13 +17,14 @@ const run = (cmd, args, env = {}) => execFileSync(cmd, args, { cwd: root, stdio:
 
 // rustup's toolchain, not whatever cargo is first on PATH (Homebrew's has no wasm32).
 const sysroot = execFileSync('rustup', ['run', 'stable', 'rustc', '--print', 'sysroot'], { encoding: 'utf8' }).trim();
-run(join(sysroot, 'bin', 'cargo'), ['build', '-p', 'pocket-scraper-core-wasm', '--target', 'wasm32-unknown-unknown', '--release', '--locked'], {
-  RUSTC: join(sysroot, 'bin', 'rustc'),
-  // This toolchain's rust-lld looks for libLLVM next to itself; point it at the sysroot.
-  DYLD_FALLBACK_LIBRARY_PATH: join(sysroot, 'lib')
+const exe = name => join(sysroot, 'bin', process.platform === 'win32' ? `${name}.exe` : name);
+run(exe('cargo'), ['build', '-p', 'pocket-scraper-core-wasm', '--target', 'wasm32-unknown-unknown', '--release', '--locked'], {
+  RUSTC: exe('rustc'),
+  // On macOS this toolchain's rust-lld looks for libLLVM next to itself; point it at the sysroot.
+  ...(process.platform === 'darwin' ? { DYLD_FALLBACK_LIBRARY_PATH: join(sysroot, 'lib') } : {})
 });
 
-const bindgen = join(root, '.tools', 'bin', 'wasm-bindgen');
+const bindgen = join(root, '.tools', 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
 if (!existsSync(bindgen)) throw new Error('wasm-bindgen is missing: cargo install --locked --root .tools wasm-bindgen-cli --version 0.2.129');
 rmSync(generated, { recursive: true, force: true });
 run(bindgen, ['--target', 'web', '--out-dir', generated, join(root, 'target', 'wasm32-unknown-unknown', 'release', 'pocket_scraper_core_wasm.wasm')]);

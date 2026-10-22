@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust + headless browser (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux libraries for the headless shell, and Chrome's sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 libdbus-1-3
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which Chrome's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install the pinned headless shell (verified by SHA-256)
+        run: cargo run --locked -p pocket-scraper-host --bin pocket-scraper-runner -- install-browser
+      - name: Test
+        run: cargo test --locked --workspace -- --test-threads=1
+      - name: Release binaries
+        run: cargo build --locked --release -p pocket-scraper-host
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pocket-scraper-${{ matrix.os }}
+          path: |
+            target/release/pocket-scraper-runner
+            target/release/pocket-scraper-runner.exe
+            target/release/pocket-scraper-host
+            target/release/pocket-scraper-host.exe
+          if-no-files-found: error
+
+  extension:
+    name: Extension (WASM build, type-check, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo install --locked --root .tools wasm-bindgen-cli --version 0.2.129
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: node --test --test-concurrency=1 "tests/**/*.test.mjs"

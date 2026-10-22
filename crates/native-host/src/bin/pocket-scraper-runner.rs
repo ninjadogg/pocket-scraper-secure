@@ -172,9 +172,27 @@ fn schedule(args: &[String]) -> Result<(), String> {
     };
     let exe = Some(installed_exe()).filter(|p| p.is_file()).map(Ok).unwrap_or_else(|| std::env::current_exe().map_err(|e| e.to_string()))?;
     match args.first().map(String::as_str) {
+        Some("print") if cfg!(windows) => {
+            println!("{}", schtasks_create(&exe, every).join(" "));
+            Ok(())
+        }
         Some("print") => {
             print!("{}", if cfg!(target_os = "macos") { launchd_plist(&exe, every) } else { systemd_units(&exe, every).join("\n") });
             println!("\n# Or with cron:\n*/{every} * * * * {} run-due >> {} 2>&1", shell_quote(&exe), shell_quote(&runner::dir().join("runner.log")));
+            Ok(())
+        }
+        Some("install") if cfg!(windows) => {
+            let args = schtasks_create(&exe, every);
+            let ok = Command::new(&args[0]).args(&args[1..]).status().map_err(|e| format!("schtasks: {e}"))?;
+            if !ok.success() {
+                return Err(format!("schtasks failed ({ok})"));
+            }
+            println!("Scheduled: run-due every {every} minutes (Task Scheduler: {TASK}).");
+            Ok(())
+        }
+        Some("uninstall") if cfg!(windows) => {
+            let _ = Command::new("schtasks").args(["/Delete", "/TN", TASK, "/F"]).status();
+            println!("Schedule removed.");
             Ok(())
         }
         Some("install") if cfg!(target_os = "macos") => {
@@ -223,6 +241,20 @@ fn schedule(args: &[String]) -> Result<(), String> {
     }
 }
 
+const TASK: &str = "PocketScraperSecure Runner";
+
+/// Task Scheduler: every N minutes, as the current user, only while logged on (no
+/// stored password).
+fn schtasks_create(exe: &Path, every: u32) -> Vec<String> {
+    ["schtasks", "/Create", "/SC", "MINUTE", "/MO", &every.to_string(), "/TN", TASK, "/TR", &format!("\"{}\" run-due", exe.display()), "/F"].iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(not(unix))]
+fn uid() -> u32 {
+    0
+}
+
+#[cfg(unix)]
 fn uid() -> u32 {
     #[allow(unsafe_code)]
     // SAFETY: getuid has no preconditions and cannot fail.
