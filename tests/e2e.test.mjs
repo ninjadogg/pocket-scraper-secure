@@ -90,7 +90,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
   const child = spawn(browserPath, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     `--disable-extensions-except=${ext}`, `--load-extension=${ext}`, 'about:blank'
-  ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, PSS_DATA_DIR: join(work, 'host-data') } });
+  ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, PSS_DATA_DIR: join(work, 'host-data'), PSS_BROWSER_PATH: browserPath } });
   const { call } = cdp(child);
   try {
     // The manifest key pins the extension ID the native host allows.

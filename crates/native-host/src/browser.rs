@@ -28,10 +28,19 @@ const COMMON_FLAGS: &[&str] = &[
     "--password-store=basic",
 ];
 
+/// The browser for runs: `PSS_BROWSER_PATH` if set, otherwise the pinned headless
+/// shell (`install-browser`). Never the person's own Chrome: starting that from a
+/// background process trips macOS App Management and shares its update cycle.
 pub fn find_chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PSS_BROWSER_PATH") {
         return Some(PathBuf::from(p));
     }
+    crate::headless::installed()
+}
+
+/// A visible browser for session setup (signing in), which the headless shell can't
+/// show. Only started when the person asks for it.
+pub fn find_desktop_chrome() -> Option<PathBuf> {
     let candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

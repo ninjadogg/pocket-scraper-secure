@@ -5,6 +5,7 @@ const USAGE: &str = "pocket-scraper-host: Pocket Scraper Secure's native messagi
 
 Chrome starts it for the extension. To set it up:
   pocket-scraper-host install [--browser chrome|chromium|brave|edge]... [--extension-id ID]
+  pocket-scraper-host install-browser      (also done by install)
   pocket-scraper-host uninstall [--purge-profiles]";
 
 fn main() -> ExitCode {
@@ -12,6 +13,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("install") => install::install(&args[1..]),
         Some("uninstall") => install::uninstall(&args[1..]),
+        Some("install-browser") => pocket_scraper_host::headless::install(&mut |m| eprintln!("{m}")).map(|p| eprintln!("Browser ready: {}", p.display())),
         Some("--version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())

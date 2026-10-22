@@ -3,8 +3,9 @@
 The rules for every dependency:
 - **Pinned.** Exact versions in the lockfiles, with checksums: `Cargo.lock`, and
   `package-lock.json` with `save-exact`.
-- **At least 14 days old** when it was added. Four transitive crates were pinned
-  back to meet this: `inout`, `libc`, `syn` and `unicode-ident`.
+- **At least 14 days old** when it was added. Seven transitive crates were pinned
+  back to meet this: `inout`, `libc`, `syn`, `unicode-ident`, `crc32fast`,
+  `equivalent` and `typed-path`.
 - **Published by the upstream project.** Licences are permissive (MIT, Apache-2.0
   or BSD).
 - **Build-time only for npm.** npm runs with `ignore-scripts=true`, and the
@@ -30,6 +31,22 @@ python3 -I scripts/audit-crates.py Cargo.lock YYYY-MM-DD   # cut-off = today min
 | @types/filewriter | 0.0.33 | 2024-01-30 | MIT |
 | @types/har-format | 1.2.16 | 2024-09-29 | MIT |
 
+## Browser for runs
+
+Runs (native host and runner) use Google's **Chrome for Testing headless shell**,
+never the person's own Chrome. It is pinned in `browser/headless-shell.json`.
+
+| Item | Value |
+|---|---|
+| Version | 155.0.8059.39 (published 2026-10-06) |
+| Source | `https://storage.googleapis.com/chrome-for-testing-public/<version>/<platform>/chrome-headless-shell-<platform>.zip` |
+| Platforms | mac-arm64, mac-x64, linux64, linux-arm64, win64 |
+| Integrity | SHA-256 and size pinned per platform. They were recorded on 2026-10-22 and cross-checked against Google Cloud Storage's MD5 for each object. `install-browser` downloads over HTTPS only and refuses any mismatch. |
+| Signature | The macOS build is only ad-hoc signed (no Developer ID), so the pinned hash is the check on every platform. |
+
+Updating the browser means changing the version and all five hashes in one commit,
+after the same cross-check.
+
 ## Rust crates (audited 2026-10-22, cut-off 2026-10-08)
 
 | Crate | Version | Published | Licence | Repository |
@@ -48,16 +65,21 @@ python3 -I scripts/audit-crates.py Cargo.lock YYYY-MM-DD   # cut-off = today min
 | cmov | 0.5.4 | 2026-05-28 | Apache-2.0 OR MIT | RustCrypto/utils |
 | const-oid | 0.10.2 | 2026-01-07 | Apache-2.0 OR MIT | RustCrypto/formats |
 | cpufeatures | 0.3.1 | 2026-08-26 | MIT OR Apache-2.0 | RustCrypto/utils |
+| crc32fast | 1.5.2 | 2026-09-12 | MIT OR Apache-2.0 | srijs/rust-crc32fast |
 | crypto-common | 0.2.2 | 2026-05-19 | MIT OR Apache-2.0 | RustCrypto/traits |
 | ctutils | 0.4.3 | 2026-10-05 | Apache-2.0 OR MIT | RustCrypto/utils |
 | curve25519-dalek | 5.0.0 | 2026-07-06 | BSD-3-Clause | dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek |
 | curve25519-dalek-derive | 0.1.1 | 2023-10-31 | MIT/Apache-2.0 | dalek-cryptography/curve25519-dalek |
 | digest | 0.11.3 | 2026-05-03 | MIT OR Apache-2.0 | RustCrypto/traits |
+| equivalent | 1.0.2 | 2025-02-14 | Apache-2.0 OR MIT | indexmap-rs/equivalent |
 | fiat-crypto | 0.3.0 | 2025-06-04 | MIT OR Apache-2.0 OR BSD-1-Clause | mit-plv/fiat-crypto |
+| flate2 | 1.1.10 | 2026-08-28 | MIT OR Apache-2.0 | rust-lang/flate2-rs |
 | getrandom | 0.4.3 | 2026-06-17 | MIT OR Apache-2.0 | rust-random/getrandom |
+| hashbrown | 0.17.1 | 2026-05-09 | MIT OR Apache-2.0 | rust-lang/hashbrown |
 | hkdf | 0.13.0 | 2026-03-30 | MIT OR Apache-2.0 | RustCrypto/KDFs/ |
 | hmac | 0.13.0 | 2026-03-29 | MIT OR Apache-2.0 | RustCrypto/MACs |
 | hybrid-array | 0.4.15 | 2026-09-08 | MIT OR Apache-2.0 | RustCrypto/hybrid-array |
+| indexmap | 2.14.2 | 2026-09-05 | Apache-2.0 OR MIT | indexmap-rs/indexmap |
 | inout | 0.2.2 | 2025-12-27 | MIT OR Apache-2.0 | RustCrypto/utils |
 | itoa | 1.0.18 | 2026-03-20 | MIT OR Apache-2.0 | dtolnay/itoa |
 | js-sys | 0.3.106 | 2026-09-25 | MIT OR Apache-2.0 | wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
@@ -82,6 +104,7 @@ python3 -I scripts/audit-crates.py Cargo.lock YYYY-MM-DD   # cut-off = today min
 | subtle | 2.6.1 | 2024-06-24 | BSD-3-Clause | dalek-cryptography/subtle |
 | syn | 2.0.119 | 2026-07-15 | MIT OR Apache-2.0 | dtolnay/syn |
 | syn | 3.0.6 | 2026-09-16 | MIT OR Apache-2.0 | dtolnay/syn |
+| typed-path | 0.12.3 | 2026-02-11 | MIT OR Apache-2.0 | chipsenkbeil/typed-path |
 | typenum | 1.20.1 | 2026-05-29 | MIT OR Apache-2.0 | paholg/typenum |
 | unicode-ident | 1.0.26 | 2026-09-17 | (MIT OR Apache-2.0) AND Unicode-3.0 | dtolnay/unicode-ident |
 | universal-hash | 0.6.1 | 2026-02-27 | MIT OR Apache-2.0 | RustCrypto/traits |
@@ -92,4 +115,6 @@ python3 -I scripts/audit-crates.py Cargo.lock YYYY-MM-DD   # cut-off = today min
 | x25519-dalek | 3.0.0 | 2026-07-06 | BSD-3-Clause | dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek |
 | zeroize | 1.9.1 | 2026-10-06 | Apache-2.0 OR MIT | RustCrypto/utils |
 | zeroize_derive | 1.5.0 | 2026-06-12 | Apache-2.0 OR MIT | RustCrypto/utils |
+| zip | 8.6.0 | 2026-04-25 | MIT | zip-rs/zip2 |
+| zlib-rs | 0.6.8 | 2026-09-15 | Zlib | trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | 2026-07-13 | MIT | dtolnay/zmij |

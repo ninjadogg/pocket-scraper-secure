@@ -80,6 +80,8 @@ pub fn install(args: &[String]) -> Result<(), String> {
         eprintln!("Registered with {browser}: {}", path.display());
     }
     eprintln!("Installed {} (allowed extension {}).", bin.display(), o.extension_id);
+    let browser = crate::headless::install(&mut |m| eprintln!("{m}"))?;
+    eprintln!("Runs use {}", browser.display());
     Ok(())
 }
 

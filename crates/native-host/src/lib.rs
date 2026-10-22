@@ -7,5 +7,6 @@ pub mod cdp;
 pub mod driver;
 pub mod framing;
 pub mod handler;
+pub mod headless;
 pub mod install;
 pub mod paths;

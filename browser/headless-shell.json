@@ -1,0 +1,12 @@
+{
+  "comment": "Pinned Chrome for Testing chrome-headless-shell. Published 2026-10-06 by Google (storage.googleapis.com/chrome-for-testing-public). Hashes recorded 2026-10-22 and cross-checked against Google Cloud Storage's MD5. The macOS build is ad-hoc signed only, so the hash is the integrity check on every platform.",
+  "version": "155.0.8059.39",
+  "base_url": "https://storage.googleapis.com/chrome-for-testing-public",
+  "platforms": {
+    "mac-arm64": { "sha256": "b3e093c06001c41e68decbc8dd4a62f9efe4bf4e4dd247a686ea531863448d75", "size": 102429510 },
+    "mac-x64": { "sha256": "6338a784c691f42dd1ed6aeeef650171c7d72cf74bdb8450d0079864e72a8074", "size": 107758350 },
+    "linux64": { "sha256": "39dcb8c46550632a3d911850ab3b8af840b4e3f6d8622faa2018eb8756278786", "size": 124203329 },
+    "linux-arm64": { "sha256": "9fb86f7c0b2734c5febc0bbb4e85f37da43553f3f8a7970949828c5713e87e94", "size": 124553121 },
+    "win64": { "sha256": "20798f7c51a22def0b3d02e526a8f52e7ee2c7eddcde9d81a4c23f618e8b5436", "size": 124737213 }
+  }
+}

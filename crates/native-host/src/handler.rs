@@ -37,7 +37,7 @@ pub fn handle(bytes: &[u8]) -> Vec<Response> {
             };
             let failed = |message: String, attention: bool| vec![Response::RunFailed { run_id: run.run_id.clone(), message, attention }];
             let Some(chrome) = browser::find_chrome() else {
-                return failed("Chrome was not found. Install Google Chrome or set PSS_BROWSER_PATH.".into(), false);
+                return failed("The runs' browser isn't installed. Run: pocket-scraper-host install-browser".into(), false);
             };
             let profile = match paths::profile_dir(&run.recipe.origin) {
                 Ok(p) => p,
@@ -81,8 +81,8 @@ pub fn handle(bytes: &[u8]) -> Vec<Response> {
         Request::OpenSession { url } => match url::parse(&url) {
             Err(e) => vec![Response::Error { message: e.to_string() }],
             Ok(u) => {
-                let Some(chrome) = browser::find_chrome() else {
-                    return vec![Response::Error { message: "Chrome was not found.".into() }];
+                let Some(chrome) = browser::find_desktop_chrome() else {
+                    return vec![Response::Error { message: "Session setup needs Google Chrome, Chromium, Brave or Edge installed.".into() }];
                 };
                 let opened = paths::profile_dir(&u.origin).map_err(|e| e.to_string()).and_then(|p| browser::open_visible(&chrome, &p, &u.href));
                 match opened {

@@ -7,6 +7,7 @@ use pocket_scraper_core::recipe::Recipe;
 use pocket_scraper_core::records::PlainRecord;
 use pocket_scraper_core::vault::{self, KdfParams};
 use pocket_scraper_host::browser::{find_chrome, Browser};
+use pocket_scraper_host::headless;
 use pocket_scraper_host::driver::{self, Outcome};
 use pocket_scraper_host::handler;
 use std::io::{BufRead, BufReader, Write};
@@ -94,10 +95,15 @@ fn with_browser(profile: &PathBuf, f: impl FnOnce(&mut Browser)) {
 
 #[test]
 fn recipes_run_in_headless_chrome_over_the_pipe() {
-    if find_chrome().is_none() {
-        eprintln!("skipped: no Chrome installed");
+    // The runs' own browser: PSS_BROWSER_PATH, or the pinned headless shell installed
+    // by `pocket-scraper-host install-browser` (looked up before the test data folder
+    // replaces the real one).
+    let Some(shell) = std::env::var_os("PSS_BROWSER_PATH").map(PathBuf::from).or_else(headless::installed) else {
+        eprintln!("skipped: run `pocket-scraper-host install-browser` first");
         return;
-    }
+    };
+    std::env::set_var("PSS_BROWSER_PATH", &shell);
+    assert!(find_chrome().is_some());
     let base = serve();
     let data = std::env::temp_dir().join(format!("pss-host-test-{}", std::process::id()));
     std::env::set_var("PSS_DATA_DIR", &data);
