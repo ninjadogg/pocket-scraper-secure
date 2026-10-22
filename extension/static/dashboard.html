@@ -19,7 +19,7 @@
   <h2>Runners</h2>
   <p class="small">Runners run recipes on their own schedule: on a VM, a server or this computer, with no browser window. They receive only recipes signed by this vault and its public key; results come back sealed and signed.</p>
   <div id="runners"></div>
-  <div class="row"><label class="tight" for="importBatches">Import results</label><input id="importBatches" type="file" multiple accept=".pssbatch"></div>
+  <div class="row"><label class="tight" for="importBatches">Import results</label><input id="importBatches" type="file" multiple accept=".pssbatch"><button id="collect" class="tight" hidden>Collect from bucket</button></div>
   <div id="importMessage" class="message" role="status"></div>
 
   <h2 id="recordsTitle">Records</h2>

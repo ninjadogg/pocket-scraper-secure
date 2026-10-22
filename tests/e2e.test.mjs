@@ -93,6 +93,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     `--disable-extensions-except=${ext}`, `--load-extension=${ext}`, 'about:blank'
   ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, PSS_DATA_DIR: join(work, 'host-data'), PSS_BROWSER_PATH: browserPath } });
   const { call } = cdp(child);
+  let s3;
   try {
     // The manifest key pins the extension ID the native host allows.
     let worker;
@@ -204,6 +205,34 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await waitFor(`[...document.querySelectorAll('#runners span')].some(s => s.textContent === 'test-runner')`, 'the enrolled runner');
     assert.match(await importFiles([batchFile]), /success, 6 rows from test-runner/);
     assert.match(await importFiles([batchFile, tamperedFile]), /already imported.*tampered\.pssbatch: refused/);
+    // Through a bucket: the runner uploads after its run, the desktop host collects.
+    const bucket = new Map();
+    s3 = createServer((req, res) => {
+      const url = new URL(req.url, 'http://x');
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => {
+        const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
+        if (req.method === 'PUT') { bucket.set(key, Buffer.concat(chunks)); res.end(); }
+        else if (!key) res.end(`<ListBucketResult><IsTruncated>false</IsTruncated>${[...bucket.keys()].map(k => `<Key>${k}</Key>`).join('')}</ListBucketResult>`);
+        else if (bucket.has(key)) res.end(bucket.get(key));
+        else { res.statusCode = 404; res.end(); }
+      });
+    });
+    await new Promise(r => s3.listen(0, '127.0.0.1', r));
+    const s3Args = ['--endpoint', `http://127.0.0.1:${s3.address().port}`, '--bucket', 'bucket', '--access-key-id', 'AK'];
+    const secretEnv = { ...runnerEnv, PSS_S3_SECRET_ACCESS_KEY: 'secret' };
+    await promisify(execFile)(join(root, 'target', 'debug', 'pocket-scraper-runner'), ['upload', 'configure', ...s3Args], { env: secretEnv });
+    await promisify(execFile)(hostBinary, ['collector', 'configure', ...s3Args], { env: { ...secretEnv, PSS_DATA_DIR: join(work, 'host-data') } });
+    assert.match(await runner('run', saved.id), /Uploaded .*\.pssbatch/);
+    // The earlier run's batch was still in the outbox, so both go up.
+    assert.equal(bucket.size, 2);
+    await dash.evaluate(`document.querySelector('#importMessage').textContent = ''`);
+    await dash.evaluate(`document.querySelector('#collect').click()`);
+    assert.match(await waitFor(`document.querySelector('#importMessage').textContent.includes('rows') && document.querySelector('#importMessage').textContent`, 'the collected batch'), /already imported.*success, 6 rows from test-runner|success, 6 rows from test-runner.*already imported/);
+    await dash.evaluate(`document.querySelector('#importMessage').textContent = ''; document.querySelector('#collect').click()`);
+    assert.equal(await waitFor(`document.querySelector('#importMessage').textContent.startsWith('No new') && document.querySelector('#importMessage').textContent`, 'nothing new'), 'No new results in the bucket.');
+
     const runnerRun = await waitFor(`${runs}.then(rs => rs.find(r => r.via === 'runner'))`, 'the imported run');
     assert.equal(runnerRun.runner, 'test-runner');
     // Same rows as the tab runs: the open records view refreshes after the import and
@@ -269,6 +298,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     child.kill();
     await new Promise(r => child.once('exit', r));
     server.close();
+    s3?.close();
     rmSync(work, { recursive: true, force: true });
   }
 });

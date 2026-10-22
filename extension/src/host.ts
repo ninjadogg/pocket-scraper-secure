@@ -61,6 +61,26 @@ export async function runOnHost(core: Core, recipe: Recipe, vaultHeader: string,
   return { ok: false, message: String(reply.message ?? 'The native host failed.'), attention: false };
 }
 
+/** New batch files from the bucket the desktop host is configured for. The host sends
+ * each file in parts (Chrome's 1 MiB message limit); they are reassembled here and
+ * verified by the dashboard like any import. */
+export async function collectBatches(): Promise<{ ok: true; files: { key: string; text: string }[]; remaining: number } | { ok: false; message: string }> {
+  const parts = new Map<string, string[]>();
+  const reply = (await request({ type: 'collectBatches' }, (m, finish) => {
+    if (m.type === 'batchPart' && typeof m.key === 'string' && typeof m.text === 'string' && Number.isInteger(m.part) && Number.isInteger(m.parts) && (m.parts as number) <= 16) {
+      const list = parts.get(m.key) ?? new Array<string>(m.parts as number).fill('');
+      list[m.part as number] = m.text;
+      parts.set(m.key, list);
+    } else finish(m);
+  }, 180_000)) as HostMessage;
+  if (reply.type !== 'collectDone') return { ok: false, message: String(reply.message ?? 'The native host failed.') };
+  return { ok: true, files: [...parts].map(([key, list]) => ({ key, text: list.join('') })), remaining: Number(reply.remaining) || 0 };
+}
+
+export async function ackBatches(keys: string[]): Promise<void> {
+  if (keys.length) await request({ type: 'ackBatches', keys }, (m, finish) => finish(m), 10_000);
+}
+
 export async function sessionCommand(action: 'open' | 'close', url: string): Promise<{ ok: boolean; message?: string }> {
   const reply = (await request({ type: action === 'open' ? 'openSession' : 'closeSession', url }, (m, finish) => finish(m), 60_000)) as HostMessage;
   if (reply.type === 'sessionOpened' || reply.type === 'sessionClosed') return { ok: true };

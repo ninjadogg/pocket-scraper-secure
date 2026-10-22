@@ -28,6 +28,10 @@ pub enum Request {
     OpenSession { url: String },
     /// Close it again; cookies stay in the profile.
     CloseSession { url: String },
+    /// Fetch new result batches from the configured bucket.
+    CollectBatches {},
+    /// The dashboard handled these bucket objects; don't fetch them again.
+    AckBatches { keys: Vec<String> },
 }
 
 /// A validated `Request::Run`.
@@ -69,6 +73,10 @@ pub enum Response {
     RunFailed { run_id: String, message: String, attention: bool },
     SessionOpened { origin: String },
     SessionClosed { origin: String },
+    /// One piece of a batch file's text (files are split to fit Chrome's 1 MiB limit).
+    BatchPart { key: String, part: usize, parts: usize, text: String },
+    CollectDone { count: usize, remaining: usize },
+    Acked { count: usize },
     Error { message: String },
 }
 

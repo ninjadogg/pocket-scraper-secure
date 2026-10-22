@@ -4,6 +4,7 @@
 import type { UnlockedVault } from '../build/core/pocket_scraper_core_wasm.js';
 import { loadCore, type Core } from './core.js';
 import { $, download, h, send } from './dom.js';
+import { ackBatches, collectBatches } from './host.js';
 import * as store from './store.js';
 import type { Batch, PlainRecord, RecipeEntry, Runner, RunRecord } from './types.js';
 
@@ -103,6 +104,7 @@ async function renderRecipes() {
   const recipes = await store.getRecipes();
   const host = await send<{ installed: boolean; version?: string }>({ type: 'hostStatus' }).catch(() => ({ installed: false, version: undefined }));
   $('host').textContent = host.installed ? `Native host ${host.version} installed.` : 'Native host not installed: runs use a background tab in this browser.';
+  $('collect').hidden = !host.installed;
   const rows = await Promise.all(Object.values(recipes).sort((a, b) => a.recipe.name.localeCompare(b.recipe.name)).map(async e => recipeRow(e, await store.countRecords(e.recipe.id), host.installed)));
   $('recipes').replaceChildren(
     h('tr', {}, ...['Recipe', 'Site', 'Schedule', 'Runs in', 'Records', ''].map(t => h('th', {}, t))),
@@ -226,19 +228,20 @@ async function renderRunners() {
 
 /** Imports result batch files: signed by an enrolled runner, sealed to this vault,
  * each at most once. Works while the vault is locked (records stay sealed). */
-async function importBatches(files: FileList) {
+async function importBatches(files: { name: string; text: () => Promise<string>; size: number }[]): Promise<string[]> {
   const header = await store.getVaultHeader();
-  if (!header) return say('Create the vault first.', true);
+  if (!header) { say('Create the vault first.', true); return []; }
   const runners = await store.getRunners();
   const recipes = await store.getRecipes();
   const lines: string[] = [];
-  for (const file of [...files]) {
+  const handled: string[] = [];
+  for (const file of files) {
     try {
       if (file.size > 8 * 1024 * 1024) throw new Error('larger than 8 MB');
       const batch = JSON.parse(core.openBatch(await file.text(), JSON.stringify(runners.map(r => r.key)), header)) as Batch;
       const runner = runners.find(r => r.key === batch.runnerKey)!;
       if (!recipes[batch.recipeId]) throw new Error('its recipe no longer exists here');
-      if (!(await store.claimBatch(batch.batchId))) { lines.push(`${file.name}: already imported`); continue; }
+      if (!(await store.claimBatch(batch.batchId))) { lines.push(`${file.name}: already imported`); handled.push(file.name); continue; }
       await store.addRecords(batch.recipeId, batch.runId, batch.records);
       await store.putRun({
         id: batch.runId, recipeId: batch.recipeId, via: 'runner', runner: runner.name, trigger: 'schedule',
@@ -246,14 +249,29 @@ async function importBatches(files: FileList) {
         warnings: batch.warnings, ...(batch.error ? { error: batch.error } : {})
       });
       lines.push(`${file.name}: ${batch.status.replace('_', ' ')}, ${batch.rowCount} rows from ${runner.name}`);
+      handled.push(file.name);
     } catch (e) {
       lines.push(`${file.name}: refused (${(e as Error).message})`);
+      // Refused for good (not ours, tampered): don't fetch it again. A batch from a
+      // runner that isn't enrolled yet stays in the bucket for later.
+      if (!/isn't enrolled|no longer exists/.test((e as Error).message)) handled.push(file.name);
     }
   }
   $('importMessage').textContent = lines.join(' · ');
   await renderRecipes();
   await renderRuns();
   if (selected && vault) await showRecords(selected);
+  return handled;
+}
+
+async function collect() {
+  $('importMessage').textContent = 'Collecting from the bucket…';
+  const result = await collectBatches();
+  if (!result.ok) return say(result.message, true);
+  if (!result.files.length) { $('importMessage').textContent = 'No new results in the bucket.'; return; }
+  const handled = await importBatches(result.files.map(f => ({ name: f.key, size: f.text.length, text: async () => f.text })));
+  await ackBatches(handled);
+  if (result.remaining) $('importMessage').textContent += ` · ${result.remaining} more waiting: collect again.`;
 }
 
 async function renderRuns() {
@@ -279,7 +297,8 @@ async function renderRuns() {
   await renderRunners();
   await renderRuns();
   const picker = $('importBatches') as HTMLInputElement;
-  picker.addEventListener('change', () => { if (picker.files?.length) void importBatches(picker.files).finally(() => { picker.value = ''; }); });
+  picker.addEventListener('change', () => { if (picker.files?.length) void importBatches([...picker.files]).finally(() => { picker.value = ''; }); });
+  ($('collect') as HTMLButtonElement).onclick = () => void collect().catch(e => say((e as Error).message, true));
   chrome.storage.onChanged.addListener(changes => {
     if (changes.recipes) void renderRecipes();
     if (changes.vault && !vault) void renderVault();

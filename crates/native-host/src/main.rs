@@ -6,6 +6,8 @@ const USAGE: &str = "pocket-scraper-host: Pocket Scraper Secure's native messagi
 Chrome starts it for the extension. To set it up:
   pocket-scraper-host install [--browser chrome|chromium|brave|edge]... [--extension-id ID]
   pocket-scraper-host install-browser      (also done by install)
+  pocket-scraper-host collector configure --endpoint URL --bucket NAME [--region R] [--prefix P] --access-key-id ID
+                                           (read-only key; secret from PSS_S3_SECRET_ACCESS_KEY or stdin)
   pocket-scraper-host uninstall [--purge-profiles]";
 
 fn main() -> ExitCode {
@@ -13,6 +15,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("install") => install::install(&args[1..]),
         Some("uninstall") => install::uninstall(&args[1..]),
+        Some("collector") if args.get(1).map(String::as_str) == Some("configure") => pocket_scraper_host::transport::configure(&args[2..], &pocket_scraper_host::transport::collector_config_path()),
         Some("install-browser") => pocket_scraper_host::headless::install(&mut |m| eprintln!("{m}")).map(|p| eprintln!("Browser ready: {}", p.display())),
         Some("--version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));

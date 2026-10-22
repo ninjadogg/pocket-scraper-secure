@@ -382,11 +382,13 @@ name = "pocket-scraper-host"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "hmac",
  "libc",
  "pocket-scraper-core",
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
  "zip",
 ]
 

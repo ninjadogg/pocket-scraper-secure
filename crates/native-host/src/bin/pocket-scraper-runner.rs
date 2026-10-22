@@ -3,7 +3,17 @@
 
 use pocket_scraper_core::bundle::fingerprint;
 use pocket_scraper_host::paths::write_private;
-use pocket_scraper_host::{headless, runner};
+use pocket_scraper_host::{headless, runner, transport};
+
+/// After a run: upload if a bucket is configured. A failed upload leaves the batch in
+/// the outbox for the next attempt.
+fn upload_if_configured() {
+    if transport::runner_config_path().is_file() {
+        if let Err(e) = transport::upload_outbox(&mut |m| println!("{m}")) {
+            eprintln!("Upload failed (batches stay in the outbox): {e}");
+        }
+    }
+}
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -20,6 +30,10 @@ const USAGE: &str = "pocket-scraper-runner: runs Pocket Scraper Secure recipes o
   outbox                       result batches waiting to be collected
   schedule install [--every MINUTES] | uninstall | print
                                run run-due on a timer (launchd on macOS, systemd on Linux)
+  upload configure --endpoint URL --bucket NAME [--region R] [--prefix P] --access-key-id ID
+                               send batches to an S3-compatible bucket (secret from
+                               PSS_S3_SECRET_ACCESS_KEY or stdin; uploads after every run)
+  upload                       upload waiting batches now
   install-browser              download and verify the pinned headless browser
 
 Data lives in PSS_DATA_DIR if set, otherwise the platform's per-user data folder.";
@@ -33,7 +47,12 @@ fn main() -> ExitCode {
         Some("list") => list(),
         Some("remove") => args.get(1).ok_or("remove needs a recipe ID".to_string()).and_then(|id| runner::remove(id)).map(|_| println!("Removed.")),
         Some("run") => run_one(args.get(1)),
-        Some("run-due") => runner::identity().and_then(|key| runner::run_due(&key, &mut |m| println!("{m}"))).map(|n| if n == 0 { println!("Nothing was due.") }),
+        Some("run-due") => runner::identity().and_then(|key| runner::run_due(&key, &mut |m| println!("{m}"))).map(|n| {
+            if n == 0 {
+                println!("Nothing was due.");
+            }
+            upload_if_configured();
+        }),
         Some("outbox") => {
             let files = runner::outbox();
             println!("{} batch file(s) waiting in {}", files.len(), runner::dir().join("outbox").display());
@@ -43,6 +62,8 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some("schedule") => schedule(&args[1..]),
+        Some("upload") if args.get(1).map(String::as_str) == Some("configure") => transport::configure(&args[2..], &transport::runner_config_path()),
+        Some("upload") => transport::upload_outbox(&mut |m| println!("{m}")).map(|n| println!("{n} batch(es) uploaded.")),
         Some("install-browser") => headless::install(&mut |m| eprintln!("{m}")).map(|p| println!("Browser ready: {}", p.display())),
         Some("--version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -134,6 +155,8 @@ fn run_one(id: Option<&String>) -> Result<(), String> {
     let _lock = runner::lock()?;
     let (path, batch) = runner::run(&b, &key)?;
     println!("{:?}: {} rows{} → {}", batch.status, batch.row_count, batch.error.map(|e| format!(" ({e})")).unwrap_or_default(), path.display());
+    drop(_lock);
+    upload_if_configured();
     Ok(())
 }
 
