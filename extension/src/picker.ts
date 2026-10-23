@@ -117,6 +117,12 @@ g.__pssPicker = (options: PickerOptions) => {
     }
     e.preventDefault();
     e.stopImmediatePropagation();
+    // A Next button or a click step must be something clickable (plain text by
+    // mistake would give a selector that clicks nothing).
+    if ((mode === 'next' || mode === 'action') && !el.closest('a,button,[role="button"],input[type="submit"],[onclick]') && getComputedStyle(el).cursor !== 'pointer') {
+      banner.textContent = mode === 'next' ? 'That isn’t a link or button. Click the Next or Load more control itself. Esc cancels.' : 'That isn’t a link or button. Click the control itself. Esc cancels.';
+      return;
+    }
     if (mode === 'field' && rowSelector) {
       let container: Element | null = null;
       try { container = el.closest(rowSelector); } catch { /* invalid container selector */ }

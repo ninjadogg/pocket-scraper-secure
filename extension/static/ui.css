@@ -110,6 +110,8 @@ body.dashboard { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
 
 /* Popup: steps above a footer that stays in view. */
 body.popup { width: 380px; margin: 0; padding: 12px 14px 0; }
+/* A classic scrollbar narrows the popup: never scroll sideways because of it. */
+:root:has(> body.popup) { overflow-x: hidden; scrollbar-gutter: stable; }
 .step { border-top: 1px solid var(--line); padding: 10px 0 4px; }
 .step-head { display: flex; align-items: center; gap: 8px; }
 .step-num { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--input); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: var(--muted); flex: none; }
@@ -120,6 +122,19 @@ body.popup { width: 380px; margin: 0; padding: 12px 14px 0; }
 .field-item input { font-family: ui-monospace, monospace; font-size: 11px; padding: 4px 6px; }
 .footer { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: 8px 0 10px; margin-top: 10px; }
 .footer .message { margin-top: 6px; }
+
+/* Product tour: a spotlight on one control and a card explaining it. */
+.title-row { display: flex; align-items: center; gap: 8px; }
+.title-row h1 { flex: 1; }
+button.help { padding: 3px 9px; font-size: 12px; color: var(--muted); }
+.tour { position: fixed; inset: 0; z-index: 1000; }
+.tour-spot { position: fixed; border-radius: 8px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); outline: 2px solid var(--info); pointer-events: none; transition: left .15s, top .15s, width .15s, height .15s; }
+.tour-card { position: fixed; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, .4); }
+.tour-card h3 { margin: 0 0 6px; font-size: 14px; }
+.tour-card p { margin: 0 0 12px; line-height: 1.45; }
+.tour-actions { display: flex; gap: 6px; align-items: center; }
+.tour-actions .small { margin-right: auto; }
+button.tour-skip { border-color: transparent; color: var(--muted); padding-left: 4px; padding-right: 4px; }
 
 @media (max-width: 640px) {
   body.dashboard { margin: 12px auto; }

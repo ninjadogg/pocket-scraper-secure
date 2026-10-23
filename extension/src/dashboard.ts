@@ -7,6 +7,7 @@ import { $, download, h, send } from './dom.js';
 import { ackBatches, collectBatches } from './host.js';
 import { importBatchFiles, type BatchFile, type ImportOutcome } from './importer.js';
 import * as store from './store.js';
+import { startTour, tourOnce, type TourStep } from './tour.js';
 import type { PlainRecord, Recipe, RecipeEntry, RunRecord } from './types.js';
 
 let core: Core;
@@ -537,8 +538,18 @@ function bindImports() {
   ($('retryDeferred') as HTMLButtonElement).onclick = () => void collect(true).catch(e => say((e as Error).message, true));
 }
 
+const TOUR: TourStep[] = [
+  { target: '#vault', title: 'Your vault', body: 'Everything collected is encrypted with your passphrase. Unlock here to read records; it locks itself when you step away.' },
+  { target: '#tab-recipes', title: 'Recipes', body: 'Recipes you made in the toolbar popup. Run them, see how their last run went, and set up sign-in for sites that need it.' },
+  { target: '#tab-records', title: 'Records', body: 'What your recipes collected. Search, sort and export to CSV or JSON while the vault is unlocked.' },
+  { target: '#tab-runners', title: 'Runners', body: 'Run recipes on a server, a VM or a timer without Chrome. Their results come back encrypted; import them here or collect them from a bucket.' },
+  { target: '#tab-settings', title: 'Settings', body: 'Change your passphrase, how soon the vault locks, how long a run may take, and whether Claude may help manage things.' },
+  { target: '#tour', title: 'Any time', body: 'Click Take the tour to see this again.' }
+];
+
 (async () => {
   core = await loadCore();
+  $('tour').onclick = () => startTour('dashboard', TOUR);
   for (const event of ['pointerdown', 'keydown']) document.addEventListener(event, () => void touch());
   window.addEventListener('pagehide', () => vault?.free());
   for (const t of TABS) $(`tab-${t}`).onclick = () => showTab(t);
@@ -564,4 +575,5 @@ function bindImports() {
     if (changes.vault && !vault) { void renderVault(); void renderSettings(); }
   });
   setInterval(() => { if (document.visibilityState === 'visible') void renderRuns(); }, 3_000);
+  await tourOnce('dashboard', TOUR);
 })().catch(e => say((e as Error).message, true));

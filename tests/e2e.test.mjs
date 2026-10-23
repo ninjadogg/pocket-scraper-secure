@@ -131,6 +131,12 @@ test('the extension collects, seals, shows and protects records end to end', { t
     const records = `new Promise(r => { const q = indexedDB.open('pocket-scraper-secure'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll(); g.onsuccess = () => r(g.result); }; })`;
     const send = m => dash.evaluate(`chrome.runtime.sendMessage(${JSON.stringify(m)})`);
 
+    // The product tour opens by itself the first time, and stays away once skipped.
+    await waitFor(`document.querySelector('.tour-card h3')?.textContent === 'Your vault'`, 'the dashboard tour');
+    await dash.evaluate(`document.querySelector('.tour-skip').click()`);
+    await waitFor(`chrome.storage.local.get('toursSeen').then(t => t.toursSeen?.dashboard === true)`, 'the tour marked seen');
+    assert.equal(await dash.evaluate(`document.querySelector('.tour')`), null);
+
     // Runs are refused until a vault exists.
     const early = await send({ type: 'runNow', id: 'nope' });
     assert.match(early.error, /Unknown recipe/);
@@ -168,6 +174,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await dash.evaluate(`location.reload()`);
     await sleep(1000);
     await waitFor(`document.querySelectorAll('#vault input').length === 1`, 'the unlock form');
+    assert.equal(await dash.evaluate(`document.querySelector('.tour')`), null, 'no tour after it was skipped');
     await dash.evaluate(`(() => { document.querySelector('#vault input').value = ${JSON.stringify(PASS)}; document.querySelector('#vault button').click(); })()`);
     await waitFor(`document.querySelector('#vault')?.textContent.includes('Vault unlocked')`, 'unlocking');
     await waitFor(`[...document.querySelectorAll('#recipes button')].some(b => b.textContent === 'Records')`, 'the recipe list');
@@ -285,6 +292,13 @@ test('the extension collects, seals, shows and protects records end to end', { t
     // A Next link without classes of its own is named by its classed parent, not by
     // position (which would point at "Previous" once that appears).
     assert.deepEqual(await send({ type: 'startPicker', tabId: cardTab, mode: 'next', fieldName: '', kind: 'text' }), { ok: true });
+    // Plain text isn't a Next button: refused, and the picker keeps waiting.
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+      await call('Input.dispatchMouseEvent', { type, x: text.x, y: text.y, button: 'left', clickCount: 1 }, cardPage.sessionId);
+    }
+    await sleep(400);
+    assert.equal(await dash.evaluate(`chrome.storage.local.get('draft').then(d => d.draft?.nextSelector ?? '')`), '');
+    assert.ok(await cardPage.evaluate(`document.querySelector('pss-picker') !== null`), 'the picker is still waiting');
     const next = await cardPage.evaluate(`(() => { const r = document.querySelector('li.next a').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
       await call('Input.dispatchMouseEvent', { type, x: next.x, y: next.y, button: 'left', clickCount: 1 }, cardPage.sessionId);

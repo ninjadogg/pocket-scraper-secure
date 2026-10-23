@@ -3,6 +3,7 @@
 import { loadCore } from './core.js';
 import { $, h, input, select, send } from './dom.js';
 import * as store from './store.js';
+import { startTour, tourOnce, type TourStep } from './tour.js';
 import type { Draft, FieldKind, PickMode, Recipe, RecipeEntry, Step } from './types.js';
 
 let draft: Draft = store.emptyDraft();
@@ -204,10 +205,23 @@ function bind() {
   $('dashboard').onclick = () => chrome.runtime.openOptionsPage();
 }
 
+const TOUR: TourStep[] = [
+  { target: '#saved', title: 'Teach it once', body: 'A recipe tells Pocket Scraper what to collect from a site. Start with New recipe, or pick a saved one to change it.' },
+  { target: '#useTab', title: 'Start on the site', body: 'Open the page you want to collect from, then click This page.' },
+  { target: '#pickRow', title: 'Pick one record', body: 'Click Pick on page, then click one repeating item: a card, a list item or a table row. Each one becomes a record. The popup closes while you pick; reopen it to carry on.' },
+  { target: '#addField', title: 'Add the fields', body: 'Name a field (say, price), click Pick, then click that value inside one record. Repeat for each value you want.' },
+  { target: '#pickNext', title: 'More pages', body: 'If the results run over several pages, pick the Next or Load more button, and set how many pages to collect.' },
+  { target: '#schedule', title: 'Run it on a schedule', body: 'Choose how often it runs by itself. Tick Run in a private browser to use the native host, which keeps working while Chrome is closed.' },
+  { target: '#saveRow', title: 'Save and run', body: 'Save asks Chrome to allow this site. Results are encrypted as they arrive; read them in the Dashboard after unlocking your vault.' },
+  { target: '#tour', title: 'Any time', body: 'Click Tour to see this again.' }
+];
+
 (async () => {
   draft = await store.getDraft();
   bind();
+  $('tour').onclick = () => startTour('popup', TOUR);
   await loadRecipes();
   render();
   await showStatus();
+  await tourOnce('popup', TOUR);
 })().catch(e => say((e as Error).message, true));

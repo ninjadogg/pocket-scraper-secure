@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="ui.css">
 </head>
 <body class="popup">
-  <h1>Pocket Scraper Secure</h1>
+  <div class="title-row"><h1>Pocket Scraper Secure</h1><button id="tour" class="tight help" title="Show how this works">Tour</button></div>
   <div id="status" class="small"></div>
 
   <label for="saved">Recipe</label>
@@ -27,7 +27,7 @@
   <section class="step" id="step2">
     <div class="step-head"><span class="step-num">2</span><h3>Fields</h3><span class="small step-summary" id="fieldCount"></span></div>
     <div id="fields"></div>
-    <div class="row">
+    <div class="row" id="addField">
       <input id="fieldName" placeholder="New field name, e.g. title" maxlength="80">
       <select id="kind" class="tight" title="What to keep from the element"><option value="text">Text</option><option value="href">Link</option><option value="value">Value</option><option value="html">HTML</option></select>
       <button id="pickField" class="tight">Pick</button>
@@ -66,7 +66,7 @@
   </section>
 
   <div class="footer">
-    <div class="row"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Dashboard ↗</button></div>
+    <div class="row" id="saveRow"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Dashboard ↗</button></div>
     <div id="message" class="message" role="status"></div>
   </div>
   <script src="popup.js" type="module"></script>
