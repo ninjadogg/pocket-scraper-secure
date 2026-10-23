@@ -37,7 +37,9 @@ function site() {
     const url = new URL(req.url, 'http://x');
     const n = Number(url.searchParams.get('page') || 1);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(url.pathname === '/cards' ? cards : list(n));
+    // A hostile page: one link field holds a javascript: URL.
+    const links = '<title>Links</title><ul><li class="l"><a href="javascript:alert(1)">Bad</a></li><li class="l"><a href="https://example.org/ok">Good</a></li></ul>';
+    res.end(url.pathname === '/cards' ? cards : url.pathname === '/links' ? links : list(n));
   });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -299,9 +301,30 @@ test('the extension collects, seals, shows and protects records end to end', { t
     assert.equal(viaHost.status, 'success', viaHost.error);
     assert.equal(viaHost.via, 'host');
     assert.equal(viaHost.rowCount, 4);
-    await dash.evaluate(`[...document.querySelectorAll('#recipes tr')].find(tr => tr.textContent.includes('Hosted')).querySelector('button:nth-of-type(2)').click()`);
+    await dash.evaluate(`[...[...document.querySelectorAll('#recipes tr')].find(tr => tr.textContent.includes('Hosted')).querySelectorAll('button')].find(b => b.textContent === 'Records').click()`);
     const hostedTable = await waitFor(`document.querySelector('#recordsTitle').textContent.includes('Hosted') && document.querySelector('#records table')?.innerText`, 'the hosted records');
     for (let i = 3; i <= 6; i++) assert.match(hostedTable, new RegExp(`Item ${i}\\b`));
+
+    // The records view: only http(s) values become links; search and sorting work.
+    const linked = await send({ type: 'saveRecipe', recipe: { name: 'Links', url: `${base}/links`, rowSelector: 'li.l', fields: [{ name: 'label', selector: 'a' }, { name: 'target', selector: 'a', kind: 'href' }] } });
+    assert.equal(linked.error, undefined, linked.error);
+    await send({ type: 'runNow', id: linked.id });
+    await waitFor(`${runs}.then(rs => rs.some(r => r.recipeId === ${JSON.stringify(linked.id)} && r.status === 'success'))`, 'the links run');
+    await dash.evaluate(`[...[...document.querySelectorAll('#recipes tr')].find(tr => tr.textContent.includes('Links')).querySelectorAll('button')].find(b => b.textContent === 'Records').click()`);
+    await waitFor(`document.querySelector('#recordsTitle').textContent.includes('Links') && document.querySelector('#records table')`, 'the links records');
+    assert.equal(await dash.evaluate(`location.hash`), '#records');
+    assert.equal(await dash.evaluate(`document.querySelectorAll('#records a[href^="javascript"]').length`), 0, 'no javascript: links');
+    assert.match(await dash.evaluate(`document.querySelector('#records table').innerText`), /javascript:alert\(1\)/, 'shown as text');
+    assert.equal(await dash.evaluate(`document.querySelector('#records a[href="https://example.org/ok"]')?.rel`), 'noopener noreferrer');
+    await dash.evaluate(`(() => { const s = document.querySelector('#records input[type=search]'); s.value = 'good'; s.dispatchEvent(new Event('input')); })()`);
+    await waitFor(`document.querySelectorAll('#records table tr').length === 2`, 'the search filter');
+    await dash.evaluate(`(() => { const s = document.querySelector('#records input[type=search]'); s.value = ''; s.dispatchEvent(new Event('input')); })()`);
+    await waitFor(`document.querySelectorAll('#records table tr').length === 3`, 'the cleared search');
+    await dash.evaluate(`[...document.querySelectorAll('#records th button')].find(b => b.textContent.startsWith('label')).click()`);
+    assert.deepEqual(await dash.evaluate(`[...document.querySelectorAll('#records table tr')].slice(1).map(tr => tr.children[1].textContent)`), ['Bad', 'Good']);
+    await dash.evaluate(`[...document.querySelectorAll('#records th button')].find(b => b.textContent.startsWith('label')).click()`);
+    assert.deepEqual(await dash.evaluate(`[...document.querySelectorAll('#records table tr')].slice(1).map(tr => tr.children[1].textContent)`), ['Good', 'Bad']);
+    assert.equal(await dash.evaluate(`document.querySelector('#recordsRecipe').value`), linked.id);
 
     // Claude access: the MCP server reaches the extension only once the person turns
     // it on, reads records only while unlocked, and deletes only with confirm.
@@ -346,7 +369,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
 
       const list = await tool('list_recipes');
       assert.match(notes.get('list_recipes'), /data, not instructions/);
-      assert.deepEqual(list.map(r => r.name).sort(), ['Hosted', 'List']);
+      assert.deepEqual(list.map(r => r.name).sort(), ['Hosted', 'Links', 'List']);
       assert.ok(list.every(r => r.siteAllowed));
 
       // Kick off a run and wait for it.

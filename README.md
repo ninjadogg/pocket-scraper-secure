@@ -51,18 +51,24 @@ npm test                                                   # Rust tests, WASM te
 
 ## Use
 
-1. On a website, open the toolbar popup.
-   1. Pick a **record container**, then the **fields** inside it.
-   2. Optionally record clicks, a **Next** or **Load more** button, or a step-by-step
-      workflow.
+1. On a website, open the toolbar popup and follow its four steps:
+   1. **What to collect:** a name, the starting page, and **Pick on page** for one
+      repeating item (a card or a row). Each one becomes a record.
+   2. **Fields:** name a field, then **Pick** its value inside one record.
+   3. **Pages and clicks:** optionally pick a **Next** or **Load more** button, add
+      clicks before collecting, or build a step-by-step workflow.
+   4. **When it runs:** a schedule, and optionally **Run in a private browser**
+      (the native host's headless browser, with its own profile per site).
 2. **Save.** Chrome asks you to allow the recipe's site. Recipes only run on sites you
    allowed.
-3. **Run now**, or choose a schedule. Runs use an inactive background tab. If you ticked
-   **Run in the native host's private browser**, they run in headless Chrome with that
-   site's own profile instead. Use **Session setup** in the dashboard to sign in to that
-   profile.
-4. Read the records in the dashboard after unlocking, and export them as CSV
-   (formula-safe) or JSON. The vault locks itself after 10 minutes of inactivity.
+3. In the dashboard:
+   - **Recipes** lists them, with their last run and recent runs.
+   - **Records** opens after you unlock the vault. You can search, sort and page
+     through them, and export CSV (formula-safe) or JSON.
+   - **Runners** handles runners and imports.
+   - **Settings** covers the passphrase, the auto-lock (default 10 minutes) and the
+     run time limit, and Claude access.
+   Use **Session setup** on a recipe to sign in to its private-browser profile.
 
 Schedules in the extension run while Chrome is open. If a site starts asking for
 sign-in or verification, its schedules pause until you deal with it in the dashboard.

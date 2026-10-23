@@ -43,22 +43,26 @@ function render() {
   ($('pickNext') as HTMLButtonElement).disabled = Boolean(draft.workflow);
   input('repeatCount').value = String(draft.workflow?.repeatCount ?? 1);
 
-  $('fields').replaceChildren(...draft.fields.map((f, i) => {
-    const selector = h('input', { value: f.selector, title: 'CSS selector (edit if needed)', onchange: () => { f.selector = selector.value; void persist(); } });
-    return h('div', { className: 'item' },
-      h('div', {}, `${f.name} (${f.kind})`),
-      h('div', { className: 'row' }, selector, h('button', { className: 'tight', title: 'Remove field', onclick: async () => { draft.fields.splice(i, 1); await persist(); render(); } }, '×')));
-  }));
+  const kinds: Record<string, string> = { text: 'text', href: 'link', value: 'value', html: 'HTML' };
+  $('fields').replaceChildren(...(draft.fields.length ? draft.fields.map((f, i) => {
+    const selector = h('input', { value: f.selector, title: 'Where it is on the page (a CSS selector; edit if needed)', onchange: () => { f.selector = selector.value; void persist(); } });
+    return h('div', { className: 'item field-item' },
+      h('span', { className: 'name', title: `${f.name} (${kinds[f.kind] ?? f.kind})` }, f.name), h('span', { className: 'small' }, kinds[f.kind] ?? f.kind), selector,
+      h('button', { className: 'tight danger', title: `Remove ${f.name}`, onclick: async () => { draft.fields.splice(i, 1); await persist(); render(); } }, '×'));
+  }) : [h('p', { className: 'small' }, 'No fields yet.')]));
+  $('fieldCount').textContent = draft.fields.length ? `${draft.fields.length} field${draft.fields.length === 1 ? '' : 's'}` : '';
+  $('step1').classList.toggle('done', Boolean(draft.url && draft.rowSelector));
+  $('step2').classList.toggle('done', draft.fields.length > 0);
 
-  const pageItems: HTMLElement[] = draft.actions.map((a, i) => {
-    const selector = h('input', { value: a.selector, title: 'Clicked before extracting', onchange: () => { a.selector = selector.value; void persist(); } });
-    return h('div', { className: 'item' }, h('div', { className: 'small' }, `Click ${i + 1} before extracting`),
-      h('div', { className: 'row' }, selector, h('button', { className: 'tight', onclick: async () => { draft.actions.splice(i, 1); await persist(); render(); } }, '×')));
-  });
+  const removable = (label: string, value: string, onchange: (v: string) => void, remove: () => void) => {
+    const selector = h('input', { value, onchange: () => { onchange(selector.value); void persist(); } });
+    return h('div', { className: 'item' }, h('div', { className: 'small' }, label),
+      h('div', { className: 'row' }, selector, h('button', { className: 'tight danger', title: 'Remove', onclick: async () => { remove(); await persist(); render(); } }, '×')));
+  };
+  const pageItems: HTMLElement[] = draft.actions.map((a, i) =>
+    removable(`Click ${i + 1}, before collecting`, a.selector, v => { a.selector = v; }, () => draft.actions.splice(i, 1)));
   if (draft.nextSelector) {
-    const next = h('input', { value: draft.nextSelector, onchange: () => { draft.nextSelector = next.value; void persist(); } });
-    pageItems.push(h('div', { className: 'item' }, h('div', { className: 'small' }, 'Next-page / Load more button'),
-      h('div', { className: 'row' }, next, h('button', { className: 'tight', onclick: async () => { draft.nextSelector = ''; await persist(); render(); } }, '×'))));
+    pageItems.push(removable('Next / Load more button', draft.nextSelector, v => { draft.nextSelector = v; }, () => { draft.nextSelector = ''; }));
   }
   $('actions').replaceChildren(...pageItems);
 
@@ -68,7 +72,7 @@ function render() {
 }
 
 function stepItem(step: Step, i: number, steps: Step[]): HTMLElement {
-  const title = step.type === 'extract' ? 'Extract the fields' : step.type === 'click' ? 'Click' : 'Wait';
+  const title = step.type === 'extract' ? 'Collect the fields' : step.type === 'click' ? 'Click' : 'Wait';
   const item = h('div', { className: 'item' }, h('div', {}, `${i + 1}. ${title}`));
   if (step.type === 'click') {
     const selector = h('input', { value: step.selector, title: 'Click target', onchange: () => { step.selector = selector.value; void persist(); } });
@@ -86,7 +90,7 @@ function stepItem(step: Step, i: number, steps: Step[]): HTMLElement {
   item.append(h('div', { className: 'row' },
     h('button', { disabled: i === 0, onclick: move(-1) }, 'Up'),
     h('button', { disabled: i === steps.length - 1, onclick: move(1) }, 'Down'),
-    h('button', { onclick: async () => { steps.splice(i, 1); await persist(); render(); } }, 'Remove')));
+    h('button', { className: 'danger', onclick: async () => { steps.splice(i, 1); await persist(); render(); } }, 'Remove')));
   return item;
 }
 
@@ -146,7 +150,7 @@ async function save(runAfter: boolean) {
     select('saved').value = saved.id;
     if (runAfter) {
       await send({ type: 'runNow', id: saved.id });
-      say('Running in a background tab. Results appear in the dashboard.');
+      say(draft.useNativeHost ? 'Running in the private browser. Results appear in the dashboard.' : 'Running in a background tab. Results appear in the dashboard.');
     } else say('Saved.');
   } catch (e) {
     say((e as Error).message, true);
@@ -165,7 +169,7 @@ async function showStatus() {
   const host = await send<{ installed: boolean }>({ type: 'hostStatus' }).catch(() => ({ installed: false }));
   $('status').textContent = vault ? 'Vault ready: results are stored encrypted.' : 'Set up the vault in the dashboard before running recipes.';
   input('useNativeHost').disabled = !host.installed && !draft.useNativeHost;
-  $('hostNote').textContent = host.installed ? 'Native host installed: scheduled runs can use a separate, private browser profile.' : 'Native host not installed; runs use a background tab.';
+  $('hostNote').textContent = host.installed ? 'Uses a separate browser profile on this computer, so it can run while this window is closed.' : 'Needs the native host (not installed). Runs use a background tab in this browser.';
 }
 
 function bind() {
@@ -176,6 +180,7 @@ function bind() {
   $('pickRow').onclick = () => pick('row');
   $('pickField').onclick = () => pick('field');
   $('pickAction').onclick = () => pick('action');
+  $('pickStepClick').onclick = () => pick('action');
   $('pickNext').onclick = () => pick('next');
   $('addWait').onclick = async () => { draft.workflow?.steps.push({ type: 'wait', waitMs: 1000 }); await persist(); render(); };
   $('addExtract').onclick = async () => { draft.workflow?.steps.push({ type: 'extract' }); await persist(); render(); };

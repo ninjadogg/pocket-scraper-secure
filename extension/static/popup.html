@@ -10,53 +10,65 @@
   <h1>Pocket Scraper Secure</h1>
   <div id="status" class="small"></div>
 
-  <label for="saved">Saved recipes</label>
+  <label for="saved">Recipe</label>
   <select id="saved"><option value="">New recipe</option></select>
 
-  <label for="name">Recipe name</label>
-  <input id="name" placeholder="Competitor job posts" maxlength="120">
-  <label for="url">Starting address</label>
-  <div class="row"><input id="url" placeholder="https://example.com/jobs"><button id="useTab" class="tight">This page</button></div>
+  <section class="step" id="step1">
+    <div class="step-head"><span class="step-num">1</span><h3>What to collect</h3></div>
+    <label for="name">Name</label>
+    <input id="name" placeholder="Competitor job posts" maxlength="120">
+    <label for="url">Starting page</label>
+    <div class="row"><input id="url" placeholder="https://example.com/jobs"><button id="useTab" class="tight">This page</button></div>
+    <label for="rowSelector">One record is…</label>
+    <div class="row"><input id="rowSelector" placeholder="A card, list item or table row"><button id="pickRow" class="tight">Pick on page</button></div>
+    <p class="small">Click one repeating item on the page (a card or a row). Each one becomes a record.</p>
+  </section>
 
-  <hr>
-  <label for="rowSelector">Record container</label>
-  <div class="row"><input id="rowSelector" placeholder="A card, list item or table row"><button id="pickRow" class="tight">Pick</button></div>
-  <p class="small">Pick the container first, then fields inside it. Each container becomes one record.</p>
+  <section class="step" id="step2">
+    <div class="step-head"><span class="step-num">2</span><h3>Fields</h3><span class="small step-summary" id="fieldCount"></span></div>
+    <div id="fields"></div>
+    <div class="row">
+      <input id="fieldName" placeholder="New field name, e.g. title" maxlength="80">
+      <select id="kind" class="tight" title="What to keep from the element"><option value="text">Text</option><option value="href">Link</option><option value="value">Value</option><option value="html">HTML</option></select>
+      <button id="pickField" class="tight">Pick</button>
+    </div>
+    <p class="small">Pick, then click the value inside one record on the page. Reopen this popup to continue; Esc cancels.</p>
+  </section>
 
-  <label for="fieldName">Fields</label>
-  <div class="row">
-    <input id="fieldName" placeholder="Field name, e.g. title" maxlength="80">
-    <select id="kind" class="tight"><option value="text">Text</option><option value="href">Link</option><option value="value">Value</option><option value="html">HTML</option></select>
+  <section class="step" id="step3">
+    <div class="step-head"><span class="step-num">3</span><h3>Pages and clicks</h3></div>
+    <label for="mode">How it moves through the site</label>
+    <select id="mode"><option value="pages">Collect each page, then click Next</option><option value="workflow">Step-by-step workflow</option></select>
+    <div id="pagesControls">
+      <div id="actions"></div>
+      <div class="row"><button id="pickNext">Pick Next / Load more</button><button id="pickAction">Add a click first</button></div>
+      <label for="maxPages">Maximum pages</label>
+      <input id="maxPages" type="number" min="1" max="30" value="1">
+    </div>
+    <div id="workflowControls" hidden>
+      <p class="small">Steps run top to bottom. “Add click” picks a button or link on the page.</p>
+      <div id="steps"></div>
+      <div class="row"><button id="pickStepClick">Add click</button><button id="addWait">Add wait</button><button id="addExtract">Add collect</button></div>
+      <label for="repeatCount">Repeat the workflow (1–30 times)</label>
+      <input id="repeatCount" type="number" min="1" max="30" value="1">
+    </div>
+  </section>
+
+  <section class="step" id="step4">
+    <div class="step-head"><span class="step-num">4</span><h3>When it runs</h3></div>
+    <label for="schedule">Run automatically</label>
+    <select id="schedule">
+      <option value="0">Only when I run it</option><option value="15">Every 15 minutes</option><option value="60">Every hour</option>
+      <option value="360">Every 6 hours</option><option value="1440">Every day</option><option value="10080">Every week</option>
+    </select>
+    <label class="check"><input id="useNativeHost" type="checkbox">Run in a private browser (native host)</label>
+    <p class="small" id="hostNote"></p>
+  </section>
+
+  <div class="footer">
+    <div class="row"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Dashboard ↗</button></div>
+    <div id="message" class="message" role="status"></div>
   </div>
-  <div class="row"><button id="pickField">Pick field</button><button id="pickAction">Record click</button><button id="pickNext">Pick Next</button></div>
-  <p class="small">After Pick, click the element on the page. Reopen this popup to continue. Esc cancels.</p>
-  <div id="fields"></div>
-
-  <label for="mode">How it runs</label>
-  <select id="mode"><option value="pages">Clicks, then extract pages</option><option value="workflow">Step-by-step workflow</option></select>
-  <div id="pagesControls">
-    <div id="actions"></div>
-    <label for="maxPages">Maximum pages</label>
-    <input id="maxPages" type="number" min="1" max="30" value="1">
-  </div>
-  <div id="workflowControls" hidden>
-    <p class="small">Steps run top to bottom. Record click adds a click step.</p>
-    <div class="row"><button id="addWait">Add wait</button><button id="addExtract">Add extract</button></div>
-    <div id="steps"></div>
-    <label for="repeatCount">Repeat the workflow (1–30 times)</label>
-    <input id="repeatCount" type="number" min="1" max="30" value="1">
-  </div>
-
-  <label for="schedule">Run automatically</label>
-  <select id="schedule">
-    <option value="0">Manual only</option><option value="15">Every 15 minutes</option><option value="60">Every hour</option>
-    <option value="360">Every 6 hours</option><option value="1440">Every day</option><option value="10080">Every week</option>
-  </select>
-  <label><input id="useNativeHost" type="checkbox">Run in the native host's private browser</label>
-  <p class="small" id="hostNote"></p>
-
-  <div class="row"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Results ↗</button></div>
-  <div id="message" class="message" role="status"></div>
   <script src="popup.js" type="module"></script>
 </body>
 </html>
