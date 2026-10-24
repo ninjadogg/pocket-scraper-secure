@@ -85,6 +85,15 @@ const fileName = (name: string) => name.replace(/[^\w.-]+/g, '_').slice(0, 60) |
 /** Lets the browser paint (a "working" state) before slow synchronous work. */
 const paint = () => new Promise(r => setTimeout(r, 30));
 
+/** Async renders can overlap (storage changes arrive in bursts) and finish out of
+ * order: each draws only if no newer render of the same part has started. */
+const renderSeq = new Map<string, number>();
+function latest(part: string): () => boolean {
+  const n = (renderSeq.get(part) ?? 0) + 1;
+  renderSeq.set(part, n);
+  return () => renderSeq.get(part) === n;
+}
+
 /** Re-renders without losing keyboard focus: focus goes back to the element with the
  * same id, if it still exists. */
 async function keepFocus(update: () => Promise<void> | void) {
@@ -137,7 +146,9 @@ function labelled(text: string, input: HTMLInputElement): HTMLElement {
 }
 
 async function renderVault() {
+  const current = latest('vault');
   const header = await store.getVaultHeader();
+  if (!current()) return;
   const box = $('vault');
   if (!header) {
     const pass = h('input', { type: 'password', autocomplete: 'new-password', placeholder: `At least ${core.minPassphraseChars()} characters` });
@@ -191,6 +202,7 @@ async function renderVault() {
     return;
   }
   const { autoLockMinutes } = await store.getSettings();
+  if (!current()) return;
   box.replaceChildren(h('div', { className: 'vault-bar' },
     h('strong', { className: 'status-success' }, 'Vault unlocked'),
     h('span', { className: 'grow small' }, `Locks after ${plural(autoLockMinutes, 'minute')} without activity.`),
@@ -203,6 +215,7 @@ async function renderVault() {
 const reviewing = new Set<string>();
 
 async function renderRecipes() {
+  const current = latest('recipes');
   const recipes = await store.getRecipes();
   host = await send<{ installed: boolean; version?: string }>({ type: 'hostStatus' }).catch(() => ({ installed: false }));
   $('host').replaceChildren(...(host.installed
@@ -215,6 +228,7 @@ async function renderRecipes() {
   const sorted = Object.values(recipes).sort((a, b) => a.recipe.name.localeCompare(b.recipe.name));
   const rows = (await Promise.all(sorted.map(async e =>
     recipeRows(e, await store.countRecords(e.recipe.id), lastRun.get(e.recipe.id), await chrome.permissions.contains({ origins: [new URL(e.recipe.url).origin + '/*'] }))))).flat();
+  if (!current()) return;
   await keepFocus(() => {
     $('recipes').replaceChildren(
       h('tr', {}, ...['Recipe', 'Schedule', 'Runs on', 'Last run', 'Records', ''].map(t => h('th', {}, t))),
@@ -325,8 +339,10 @@ function showCommand(text: string, command: string) {
 let runsShown = '';
 
 async function renderRuns() {
+  const current = latest('runs');
   const recipes = await store.getRecipes();
   const runs: RunRecord[] = await store.listRuns(50);
+  if (!current()) return;
   // Redrawn only when something changed, so keyboard and screen-reader positions stay.
   const signature = JSON.stringify(runs.map(r => [r.id, r.status, r.rowCount, r.error, r.warnings.length, recipes[r.recipeId]?.recipe.name]));
   if (signature === runsShown) return;
@@ -535,7 +551,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function renderSettings() {
   const msg = (text: string, bad = false) => say(text, bad, 'settingsMessage');
+  const current = latest('settings');
   const header = await store.getVaultHeader();
+  if (!current()) return;
   const box = $('vaultSettings');
   const fingerprint = header && core.vaultFingerprint(header);
   const fpLine = fingerprint ? [h('p', { className: 'small' }, 'Vault fingerprint (runners check it): ', h('code', {}, fingerprint))] : [];
@@ -566,6 +584,7 @@ async function renderSettings() {
   }
 
   const s = await store.getSettings();
+  if (!current()) return;
   const lockMinutes = h('input', { id: 'autoLockMinutes', type: 'number', min: '1', max: '240', value: String(s.autoLockMinutes) });
   const timeout = h('input', { id: 'runTimeoutSeconds', type: 'number', min: '10', max: '3600', value: String(s.runTimeoutMs / 1000) });
   const saveRuns = async () => {
@@ -585,9 +604,11 @@ async function renderSettings() {
 
 /** Bucket settings Claude proposed: they take effect only once approved here. */
 async function renderBuckets() {
+  const current = latest('buckets');
   const box = $('buckets');
   if (!host.installed) { box.replaceChildren(); return; }
   const items = await pendingBuckets().catch(() => []);
+  if (!current()) return;
   if (!items.length) { box.replaceChildren(); return; }
   const role = (r: string) => (r === 'runner' ? 'Runner uploads (this computer’s runner)' : 'Collecting results (this computer)');
   box.replaceChildren(h('div', { className: 'card' },
@@ -624,7 +645,9 @@ async function renderClaude() {
 const confirming = new Set<string>();
 
 async function renderRunners() {
+  const current = latest('runners');
   const runners = await store.getRunners();
+  if (!current()) return;
   const msg = (text: string, bad = false) => say(text, bad, 'runnersMessage');
   await keepFocus(() => $('runnerList').replaceChildren(
     ...(runners.length ? runners.map(r => h('div', { className: 'runner' },
