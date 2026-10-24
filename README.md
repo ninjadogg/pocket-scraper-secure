@@ -1,6 +1,6 @@
 # Pocket Scraper Secure
 
-A hardened rebuild of [Pocket Scraper](https://github.com/ninjadogg/pocket-scraper). You
+A hardened rebuild of Pocket Scraper. You
 click the elements to collect, replay pagination and click workflows on a schedule, and
 the results stay encrypted, all without a network listener.
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Pocket Scraper Secure is a rebuild of [Pocket Scraper](https://github.com/ninjadogg/pocket-scraper)
+Pocket Scraper Secure is a rebuild of Pocket Scraper
 around a smaller attack surface:
 
 - **No network listener.** There is no localhost HTTP API, connection token or CORS
