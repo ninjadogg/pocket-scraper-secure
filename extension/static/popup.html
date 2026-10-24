@@ -9,6 +9,7 @@
 <body class="popup">
   <div class="title-row"><h1>Pocket Scraper Secure</h1><button id="tour" class="tight help" title="Show how this works">Tour</button></div>
   <div id="status" class="small"></div>
+  <div id="vaultBanner" class="banner" hidden><p>First, create your vault. It keeps everything you collect encrypted.</p><button class="primary" id="setupVault">Set up vault</button></div>
 
   <label for="saved">Recipe</label>
   <select id="saved"><option value="">New recipe</option></select>
@@ -20,7 +21,7 @@
     <label for="url">Starting page</label>
     <div class="row"><input id="url" placeholder="https://example.com/jobs"><button id="useTab" class="tight">This page</button></div>
     <label for="rowSelector">One record is…</label>
-    <div class="row"><input id="rowSelector" placeholder="A card, list item or table row"><button id="pickRow" class="tight">Pick on page</button></div>
+    <div class="row"><input id="rowSelector" placeholder="Use Pick on page"><button id="pickRow" class="tight">Pick on page</button></div>
     <p class="small">Click one repeating item on the page (a card or a row). Each one becomes a record.</p>
   </section>
 
@@ -28,8 +29,8 @@
     <div class="step-head"><span class="step-num">2</span><h3>Fields</h3><span class="small step-summary" id="fieldCount"></span></div>
     <div id="fields"></div>
     <div class="row" id="addField">
-      <input id="fieldName" placeholder="New field name, e.g. title" maxlength="80">
-      <select id="kind" class="tight" title="What to keep from the element"><option value="text">Text</option><option value="href">Link</option><option value="value">Value</option><option value="html">HTML</option></select>
+      <input id="fieldName" placeholder="New field name, e.g. title" maxlength="80" aria-label="New field name">
+      <select id="kind" class="tight" title="What to keep from the element" aria-label="What to keep from the element"><option value="text">Text</option><option value="href">Link</option><option value="value">Form value</option><option value="html">HTML</option></select>
       <button id="pickField" class="tight">Pick</button>
     </div>
     <p class="small">Pick, then click the value inside one record on the page. Reopen this popup to continue; Esc cancels.</p>
@@ -41,7 +42,7 @@
     <select id="mode"><option value="pages">Collect each page, then click Next</option><option value="workflow">Step-by-step workflow</option></select>
     <div id="pagesControls">
       <div id="actions"></div>
-      <div class="row"><button id="pickNext">Pick Next / Load more</button><button id="pickAction">Add a click first</button></div>
+      <div class="row"><button id="pickNext">Pick Next / Load more</button><button id="pickAction">Add a click before collecting</button></div>
       <label for="maxPages">Maximum pages</label>
       <input id="maxPages" type="number" min="1" max="30" value="1">
     </div>
@@ -61,12 +62,12 @@
       <option value="0">Only when I run it</option><option value="15">Every 15 minutes</option><option value="60">Every hour</option>
       <option value="360">Every 6 hours</option><option value="1440">Every day</option><option value="10080">Every week</option>
     </select>
-    <label class="check"><input id="useNativeHost" type="checkbox">Run in a private browser (native host)</label>
+    <label class="check"><input id="useNativeHost" type="checkbox">Run in its own browser profile (needs the helper app)</label>
     <p class="small" id="hostNote"></p>
   </section>
 
   <div class="footer">
-    <div class="row" id="saveRow"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Dashboard ↗</button></div>
+    <div class="row" id="saveRow"><button class="primary" id="save">Save</button><button id="saveRun">Save &amp; run</button><button id="dashboard">Dashboard <span aria-hidden="true">↗</span></button></div>
     <div id="message" class="message" role="status"></div>
   </div>
   <script src="popup.js" type="module"></script>

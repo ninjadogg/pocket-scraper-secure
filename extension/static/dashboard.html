@@ -8,7 +8,6 @@
 </head>
 <body class="dashboard">
   <div class="title-row"><h1>Pocket Scraper Secure</h1><button id="tour" class="tight help" title="Show how this works">Take the tour</button></div>
-  <p class="small" id="host"></p>
 
   <section class="card" id="vault"></section>
   <div id="message" class="message" role="status"></div>
@@ -21,6 +20,7 @@
   </nav>
 
   <section id="panel-recipes" role="tabpanel" aria-labelledby="tab-recipes">
+    <div id="recipesMessage" class="message" role="status"></div>
     <div class="scroll"><table id="recipes"></table></div>
     <h2>Recent runs</h2>
     <div class="scroll"><table id="runs"></table></div>
@@ -32,8 +32,9 @@
   </section>
 
   <section id="panel-runners" role="tabpanel" aria-labelledby="tab-runners" hidden>
-    <p class="small">Runners run recipes on their own schedule, with no browser window: on a VM, a server or this computer. They only accept recipes signed by this vault. Their results come back sealed and signed. See docs/RUNNER.md.</p>
-    <div id="runners"></div>
+    <p class="small">Runners run recipes on their own schedule, with no browser window: on a VM, a server or this computer. They only accept recipes signed by this vault, and their results come back encrypted and signed. <a href="https://github.com/ninjadogg/pocket-scraper-secure/blob/main/docs/RUNNER.md" target="_blank" rel="noopener noreferrer">How to set up a runner</a></p>
+    <div id="runnersMessage" class="message" role="status"></div>
+    <div id="runners"><div id="runnerList"></div><div id="runnerForm"></div></div>
     <h2>Import results</h2>
     <label class="dropzone" id="dropzone" for="importBatches"><strong>Drop .pssbatch files here</strong> or click to choose them<input id="importBatches" class="visually-hidden" type="file" multiple accept=".pssbatch"></label>
     <div class="actions"><button id="collect" hidden>Collect from bucket</button><button id="retryDeferred" hidden title="Results set aside because their runner wasn't approved yet or their recipe was missing">Retry set-aside</button></div>
@@ -41,11 +42,15 @@
   </section>
 
   <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <div id="settingsMessage" class="message" role="status"></div>
     <h2>Vault</h2>
     <div id="vaultSettings"></div>
     <h2>Timing</h2>
     <div id="runSettings" class="settings-grid"></div>
     <div id="runSettingsSave"></div>
+    <h2>Helper app</h2>
+    <p class="small" id="host"></p>
+    <div id="buckets"></div>
     <h2>Claude</h2>
     <section class="card" id="claude"></section>
   </section>

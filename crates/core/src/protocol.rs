@@ -37,6 +37,11 @@ pub enum Request {
     /// After a collect: `keys` were handled for good (imported, duplicate or refused);
     /// `deferred` can't be handled yet (runner not enrolled, recipe missing) and are
     /// set aside so they don't block newer results.
+    /// Bucket settings Claude proposed, waiting for the person (see `DecideBucket`).
+    PendingBuckets {},
+    /// The person approves (or discards) the proposed bucket settings for a role
+    /// ("runner" or "collector").
+    DecideBucket { role: String, approve: bool },
     AckBatches {
         keys: Vec<String>,
         #[serde(default)]
@@ -85,6 +90,20 @@ pub fn validate_run(run_id: String, recipe: RecipeInput, public_key: Vec<u8>, ru
     Ok(RunRequest { run_id, recipe: Recipe::validate(recipe)?, public_key, run_timeout_ms, observed_at })
 }
 
+/// Proposed bucket settings, without the secret.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingBucket {
+    pub role: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub prefix: String,
+    pub access_key_id: String,
+    /// Whether it would replace settings already in use.
+    pub replaces: bool,
+}
+
 /// Host → extension.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -102,6 +121,8 @@ pub enum Response {
     BatchSkipped { key: String, reason: String },
     CollectDone { count: usize, more: bool },
     Acked { count: usize },
+    PendingBuckets { items: Vec<PendingBucket> },
+    BucketDecided { role: String, approved: bool },
     BridgeReady {},
     /// A command from the MCP server for the extension, as JSON text in parts.
     BridgeRequest { id: String, part: usize, parts: usize, text: String },

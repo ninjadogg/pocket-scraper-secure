@@ -37,6 +37,9 @@ export interface RecipeEntry {
   updatedAt: string;
   /** The site needs the person (sign-in, verification); schedules pause. */
   needsAttention: boolean;
+  /** Claude created it, or changed where it goes or what it clicks: it doesn't run
+   * (or get signed for runners) until the person approves it in the dashboard. */
+  review?: boolean;
 }
 
 export type RunStatus = 'running' | 'success' | 'error' | 'needs_attention';
@@ -103,7 +106,8 @@ export type PageRequest =
   | { type: 'hostStatus' }
   | { type: 'storageRestricted' }
   | { type: 'session'; id: string; action: 'open' | 'close' }
-  | { type: 'clearAttention'; id: string };
+  | { type: 'clearAttention'; id: string }
+  | { type: 'approveRecipe'; id: string };
 
 export type PickMode = 'row' | 'field' | 'action' | 'next';
 

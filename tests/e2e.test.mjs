@@ -105,6 +105,10 @@ test('the extension collects, seals, shows and protects records end to end', { t
       if (!worker) await sleep(100);
     }
     assert.ok(worker, 'the service worker started under the pinned extension ID');
+    // Installing opens the dashboard (where the vault is created) by itself.
+    const dashboards = async () => (await call('Target.getTargets')).targetInfos.filter(t => t.type === 'page' && t.url.startsWith(`chrome-extension://${EXTENSION_ID}/dashboard.html`)).length;
+    for (let i = 0; i < 100 && (await dashboards()) < 1; i++) await sleep(100);
+    assert.equal(await dashboards(), 1, 'installing opened the dashboard');
 
     const open = async url => {
       const { targetId } = await call('Target.createTarget', { url });
@@ -131,10 +135,12 @@ test('the extension collects, seals, shows and protects records end to end', { t
     const records = `new Promise(r => { const q = indexedDB.open('pocket-scraper-secure'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll(); g.onsuccess = () => r(g.result); }; })`;
     const send = m => dash.evaluate(`chrome.runtime.sendMessage(${JSON.stringify(m)})`);
 
-    // The product tour opens by itself the first time, and stays away once skipped.
-    await waitFor(`document.querySelector('.tour-card h3')?.textContent === 'Your vault'`, 'the dashboard tour');
+    // The dashboard tour starts by itself once (in the dashboard that opened first)
+    // and can be replayed; it starts with the vault.
+    await waitFor(`chrome.storage.local.get('toursSeen').then(t => t.toursSeen?.dashboard === true)`, 'the tour shown once');
+    if (!(await dash.evaluate(`document.querySelector('.tour') !== null`))) await dash.evaluate(`document.querySelector('#tour').click()`);
+    await waitFor(`document.querySelector('.tour-card h3')?.textContent === 'Start here: create your vault'`, 'the dashboard tour');
     await dash.evaluate(`document.querySelector('.tour-skip').click()`);
-    await waitFor(`chrome.storage.local.get('toursSeen').then(t => t.toursSeen?.dashboard === true)`, 'the tour marked seen');
     assert.equal(await dash.evaluate(`document.querySelector('.tour')`), null);
 
     // Runs are refused until a vault exists.
@@ -174,7 +180,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     await dash.evaluate(`location.reload()`);
     await sleep(1000);
     await waitFor(`document.querySelectorAll('#vault input').length === 1`, 'the unlock form');
-    assert.equal(await dash.evaluate(`document.querySelector('.tour')`), null, 'no tour after it was skipped');
+    assert.equal(await dash.evaluate(`document.querySelector('.tour')`), null, 'the tour doesn’t come back once seen');
     await dash.evaluate(`(() => { document.querySelector('#vault input').value = ${JSON.stringify(PASS)}; document.querySelector('#vault button').click(); })()`);
     await waitFor(`document.querySelector('#vault')?.textContent.includes('Vault unlocked')`, 'unlocking');
     await waitFor(`[...document.querySelectorAll('#recipes button')].some(b => b.textContent === 'Records')`, 'the recipe list');
@@ -182,7 +188,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     const table = await waitFor(`document.querySelector('#records table')?.innerText`, 'the records table');
     for (let i = 1; i <= 6; i++) assert.match(table, new RegExp(`Item ${i}\\b`));
     // Opening the records removed the second run's repeat copies.
-    assert.match(await dash.evaluate(`document.querySelector('#records').innerText`), /6 record\(s\); 6 repeat copies from later runs removed/);
+    assert.match(await dash.evaluate(`document.querySelector('#records').innerText`), /6 records; 6 repeat copies from later runs removed/);
     assert.equal((await dash.evaluate(records)).length, 6);
 
     // Teach once, run anywhere: export a signed bundle, run it in the runner binary,
@@ -190,7 +196,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     const downloads = join(work, 'downloads');
     mkdirSync(downloads);
     await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
-    const fingerprint = await waitFor(`document.querySelector('#vault code')?.textContent`, 'the vault fingerprint');
+    const fingerprint = await waitFor(`document.querySelector('#vaultSettings code')?.textContent`, 'the vault fingerprint');
     await dash.evaluate(`[...document.querySelectorAll('#recipes button')].find(b => b.textContent === 'Export for runner').click()`);
     const bundleFile = join(downloads, 'List.pssbundle');
     for (let i = 0; i < 50 && !existsSync(bundleFile); i++) await sleep(100);
@@ -255,7 +261,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
     // Same rows as the tab runs: the open records view refreshes after the import and
     // removes the repeat copies, leaving the 6 distinct records.
     await waitFor(`${records}.then(r => r.length === 6)`, 'compacted records');
-    assert.match(await dash.evaluate(`document.querySelector('#records p.small').textContent`), /^6 record\(s\)/);
+    assert.match(await dash.evaluate(`document.querySelector('#records p.small').textContent`), /^6 records/);
 
     // The picker ignores synthetic clicks and accepts a real one.
     const page = await open(`${base}/list`);
@@ -271,6 +277,8 @@ test('the extension collects, seals, shows and protects records end to end', { t
     const draft = await waitFor(`chrome.storage.local.get('draft').then(d => d.draft?.fields?.length ? d.draft : null)`, 'the picked field', 10_000);
     assert.deepEqual(draft.fields, [{ name: 'title', selector: 'span.name', kind: 'text' }]);
     assert.match(draft.lastPick, /\(2 matches\)/);
+    // The picker confirms the pick briefly, then removes itself.
+    for (let i = 0; i < 40 && await page.evaluate(`document.querySelector('pss-picker') !== null`); i++) await sleep(100);
     assert.equal(await page.evaluate(`document.querySelector('pss-picker')`), null, 'the picker removed itself');
 
     // Picking a record container on plain-div cards climbs from the clicked text to the card.
@@ -405,8 +413,24 @@ test('the extension collects, seals, shows and protects records end to end', { t
       // A recipe for a site Chrome hasn't been allowed: saved, but waits for the person.
       const pending = await tool('save_recipe', { recipe: { name: 'Pending', url: `http://localhost:${server.address().port}/list`, rowSelector: 'li.card', fields: [{ name: 'name', selector: '.name' }] } });
       assert.equal(pending.siteAllowed, false);
+      assert.equal(pending.waitingForReview, true);
       await dash.evaluate(`location.reload()`);
       await waitFor(`[...document.querySelectorAll('#recipes tr')].some(tr => tr.textContent.includes('Pending') && [...tr.querySelectorAll('button')].some(b => b.textContent === 'Allow access'))`, 'the Allow access button');
+
+      // Even for an allowed site, a recipe Claude made runs only after the person reviews it.
+      const claudeMade = await tool('save_recipe', { recipe: { name: 'Claude list', url: `${base}/list`, rowSelector: 'li.card', fields: [{ name: 'name', selector: '.name' }] } });
+      assert.equal(claudeMade.siteAllowed, true);
+      assert.equal(claudeMade.waitingForReview, true);
+      assert.match((await tool('run_recipe', { recipe_id: claudeMade.recipe.id })).error, /review/);
+      await waitFor(`document.getElementById('review-${claudeMade.recipe.id}') !== null`, 'the Review button');
+      await dash.evaluate(`document.getElementById('review-${claudeMade.recipe.id}').click()`);
+      await waitFor(`document.querySelector('.review-row')?.textContent.includes('Starts at')`, 'the review panel');
+      await dash.evaluate(`document.getElementById('approve-${claudeMade.recipe.id}').click()`);
+      await waitFor(`chrome.storage.local.get('recipes').then(r => !r.recipes[${JSON.stringify(claudeMade.recipe.id)}].review)`, 'the approval');
+      assert.equal((await tool('run_recipe', { recipe_id: claudeMade.recipe.id, wait_seconds: 90 })).status, 'success');
+      // A Claude edit that only renames it needs no new review; a new address does.
+      assert.equal((await tool('save_recipe', { recipe: { ...claudeMade.recipe, name: 'Claude list 2' } })).waitingForReview, false);
+      assert.equal((await tool('save_recipe', { recipe: { ...claudeMade.recipe, url: `${base}/list?page=2` } })).waitingForReview, true);
 
       // Settings: the auto-lock can be shortened, not lengthened; out-of-range values are refused.
       assert.equal((await tool('update_settings', { auto_lock_minutes: 5 })).autoLockMinutes, 5);
@@ -421,7 +445,7 @@ test('the extension collects, seals, shows and protects records end to end', { t
       await dash.evaluate(`(() => { document.querySelector('#vault input').value = ${JSON.stringify(PASS)}; document.querySelector('#vault button').click(); })()`);
       await waitFor(`document.querySelector('#vault')?.textContent.includes('Vault unlocked')`, 'unlocking');
       // A site the person hasn't allowed can't be signed for a runner either.
-      assert.match((await tool('export_bundle', { recipe_id: pending.recipe.id, add_to_this_runner: true })).error, /Allow access/);
+      assert.match((await tool('export_bundle', { recipe_id: pending.recipe.id, add_to_this_runner: true })).error, /review/);
       // Deletes need confirm.
       assert.match((await tool('delete_recipe', { recipe_id: pending.recipe.id })).error, /confirm: true/);
       assert.deepEqual(await tool('delete_recipe', { recipe_id: pending.recipe.id, confirm: true }), { deleted: pending.recipe.id, recordsDeleted: false });
@@ -439,6 +463,10 @@ test('the extension collects, seals, shows and protects records end to end', { t
       assert.match((await tool('import_batches', { paths: [join(work, 'host-data', 'runner', 'outbox')] })).results.join(' '), /waiting for approval/);
       await waitFor(`[...document.querySelectorAll('#runners button')].some(b => b.textContent === 'Approve')`, 'the Approve button');
       await dash.evaluate(`[...document.querySelectorAll('#runners button')].find(b => b.textContent === 'Approve').click()`);
+      // A second click confirms, next to the fingerprint to compare.
+      assert.ok(await dash.evaluate(`document.querySelector('#runnerList').textContent.includes(${JSON.stringify(here.fingerprint)})`));
+      await waitFor(`[...document.querySelectorAll('#runners button')].some(b => b.textContent === 'Yes, approve')`, 'the confirmation');
+      await dash.evaluate(`[...document.querySelectorAll('#runners button')].find(b => b.textContent === 'Yes, approve').click()`);
       await waitFor(`chrome.storage.local.get('runners').then(r => r.runners.every(x => !x.pending))`, 'the approval');
       assert.match((await tool('import_batches', { paths: [join(work, 'host-data', 'runner', 'outbox')] })).results.join(' '), /success, 6 rows from this-mac/);
 
@@ -446,11 +474,20 @@ test('the extension collects, seals, shows and protects records end to end', { t
       const secretFile = join(work, 'secret.txt');
       writeFileSync(secretFile, 'secret\n');
       const bucketArgs = { role: 'collector', endpoint: `http://127.0.0.1:${s3.address().port}`, bucket: 'bucket', access_key_id: 'AK', secret_file: secretFile };
-      // The collector was configured earlier: replacing it needs confirm.
-      assert.match((await tool('configure_bucket', bucketArgs)).error, /confirm: true/);
-      const configured = await tool('configure_bucket', { ...bucketArgs, confirm: true });
-      assert.equal(configured.summary.configured, true);
+      // Claude only proposes: nothing changes until the person approves it.
+      const configured = await tool('configure_bucket', bucketArgs);
+      assert.equal(configured.proposed.configured, true);
+      assert.equal(configured.replaces, true);
       assert.doesNotMatch(JSON.stringify(configured), /secret"/);
+      assert.equal((await tool('status')).bucketsWaitingForApproval[0].role, 'collector');
+      // Too long a folder prefix (it could carry data off the machine) is refused.
+      assert.match((await tool('configure_bucket', { ...bucketArgs, prefix: 'x'.repeat(65) })).error, /64/);
+      await dash.evaluate(`document.querySelector('#tab-settings').click()`);
+      await waitFor(`document.getElementById('bucket-approve-collector') !== null`, 'the bucket approval', 20_000);
+      assert.match(await dash.evaluate(`document.querySelector('#buckets').textContent`), /Replaces current settings/);
+      await dash.evaluate(`document.getElementById('bucket-approve-collector').click()`);
+      await waitFor(`document.getElementById('bucket-approve-collector') === null`, 'the approved bucket');
+      assert.deepEqual((await tool('status')).bucketsWaitingForApproval, []);
       assert.equal((await tool('test_bucket')).ok, true);
       assert.deepEqual((await tool('collect_from_bucket')).results, []);
 

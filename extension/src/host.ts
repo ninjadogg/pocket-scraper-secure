@@ -90,3 +90,16 @@ export async function sessionCommand(action: 'open' | 'close', url: string): Pro
   if (reply.type === 'sessionOpened' || reply.type === 'sessionClosed') return { ok: true };
   return { ok: false, message: String(reply.message ?? 'The native host failed.') };
 }
+
+/** Bucket settings Claude proposed, waiting for the person (never includes the secret). */
+export interface PendingBucket { role: 'runner' | 'collector'; endpoint: string; bucket: string; region: string; prefix: string; accessKeyId: string; replaces: boolean }
+
+export async function pendingBuckets(): Promise<PendingBucket[]> {
+  const reply = (await request({ type: 'pendingBuckets' }, (m, finish) => finish(m), 10_000)) as HostMessage;
+  return reply.type === 'pendingBuckets' && Array.isArray(reply.items) ? (reply.items as PendingBucket[]) : [];
+}
+
+export async function decideBucket(role: string, approve: boolean): Promise<void> {
+  const reply = (await request({ type: 'decideBucket', role, approve }, (m, finish) => finish(m), 10_000)) as HostMessage;
+  if (reply.type !== 'bucketDecided') throw new Error(String(reply.message ?? 'The helper app failed.'));
+}

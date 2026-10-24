@@ -1,7 +1,8 @@
 // A product tour: a spotlight on one control at a time with a short explanation, and
 // Back / Next / Skip. Built from DOM nodes and text only (no HTML strings), so it
-// works under the pages' Trusted Types CSP. Each tour shows itself once; a Tour
-// button replays it.
+// works under the pages' Trusted Types CSP. Each tour shows itself once (marked seen
+// as it starts: a popup can close mid-tour); a Tour button replays it. While it is
+// open the rest of the page is inert, and focus returns where it was afterwards.
 import { h } from './dom.js';
 
 export interface TourStep { target: string; title: string; body: string }
@@ -33,10 +34,14 @@ export function startTour(name: string, allSteps: TourStep[]) {
     return el instanceof HTMLElement && el.getClientRects().length > 0;
   });
   if (!steps.length) return;
+  void markSeen(name);
+  const returnFocus = document.activeElement as HTMLElement | null;
+  const others = [...document.body.children].filter(el => !el.hasAttribute('inert')) as HTMLElement[];
+  for (const el of others) el.inert = true;
   let i = 0;
   const spot = h('div', { className: 'tour-spot' });
   const title = h('h3', { id: 'tour-title' });
-  const body = h('p', {});
+  const body = h('p', { id: 'tour-body' });
   const progress = h('span', { className: 'small' });
   const back = h('button', { onclick: () => go(i - 1) }, 'Back');
   const next = h('button', { className: 'primary', onclick: () => (i === steps.length - 1 ? end() : go(i + 1)) });
@@ -44,6 +49,7 @@ export function startTour(name: string, allSteps: TourStep[]) {
   const card = h('div', { className: 'tour-card', role: 'dialog', ariaModal: 'true' },
     title, body, h('div', { className: 'tour-actions' }, progress, skip, back, next));
   card.setAttribute('aria-labelledby', 'tour-title');
+  card.setAttribute('aria-describedby', 'tour-body');
   const layer = h('div', { className: 'tour' }, spot, card);
   // Clicks outside the card don't fall through to the page while the tour is open.
   layer.addEventListener('click', e => { if (e.target === layer) e.stopPropagation(); });
@@ -96,8 +102,9 @@ export function startTour(name: string, allSteps: TourStep[]) {
     window.removeEventListener('resize', onMove);
     window.removeEventListener('scroll', onMove, true);
     layer.remove();
+    for (const el of others) el.inert = false;
     active = null;
-    void markSeen(name);
+    returnFocus?.focus();
   }
   active = end;
   go(0);

@@ -20,6 +20,41 @@ pub fn collector_config_path() -> PathBuf {
     paths::data_dir().join("collector.json")
 }
 
+/// Where Claude's proposed settings for a config wait for the person's approval.
+pub fn pending_path(config: &std::path::Path) -> PathBuf {
+    config.with_extension("pending.json")
+}
+
+pub fn role_config_path(role: &str) -> Result<PathBuf, String> {
+    match role {
+        "runner" => Ok(runner_config_path()),
+        "collector" => Ok(collector_config_path()),
+        _ => Err("role is runner or collector".into()),
+    }
+}
+
+pub fn pending_buckets() -> Vec<pocket_scraper_core::protocol::PendingBucket> {
+    ["runner", "collector"]
+        .into_iter()
+        .filter_map(|role| {
+            let config = role_config_path(role).ok()?;
+            let c = crate::s3::Config::load(&pending_path(&config)).ok()?;
+            Some(pocket_scraper_core::protocol::PendingBucket { role: role.into(), endpoint: c.endpoint, bucket: c.bucket, region: c.region, prefix: c.prefix, access_key_id: c.access_key_id, replaces: config.is_file() })
+        })
+        .collect()
+}
+
+/// Approves (moves into place, checked again) or discards proposed settings.
+pub fn decide_bucket(role: &str, approve: bool) -> Result<(), String> {
+    let config = role_config_path(role)?;
+    let pending = pending_path(&config);
+    if approve {
+        paths::private_dir(config.parent().expect("config dir")).map_err(|e| e.to_string())?;
+        crate::s3::Config::load(&pending)?.save(&config)?;
+    }
+    std::fs::remove_file(&pending).map_err(|e| format!("Nothing is waiting for the {role}: {e}"))
+}
+
 fn state_path() -> PathBuf {
     paths::data_dir().join("collector-state.json")
 }

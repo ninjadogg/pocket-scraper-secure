@@ -89,7 +89,10 @@ fn handle(method: &str, params: &Value) -> Result<Value, String> {
 
 /// Tools whose results carry outside text (scraped values, run errors, file and
 /// object names).
-const UNTRUSTED: &[&str] = &["list_recipes", "run_recipe", "list_runs", "read_records", "import_batches", "collect_from_bucket", "runner_status", "runner_run", "runner_run_due"];
+const UNTRUSTED: &[&str] = &["status", "list_recipes", "run_recipe", "list_runs", "read_records", "import_batches", "collect_from_bucket", "test_bucket", "runner_status", "runner_run", "runner_run_due", "runner_upload"];
+
+/// Tools that reach other machines (websites, a bucket, the browser download).
+const OPEN_WORLD: &[&str] = &["run_recipe", "collect_from_bucket", "test_bucket", "runner_run", "runner_run_due", "runner_upload", "install_browser"];
 
 const NOT_CONNECTED: &str = "Claude access is off. Open Chrome with Pocket Scraper Secure and turn on Claude access in its dashboard.";
 
@@ -109,6 +112,16 @@ fn confirm_prop() -> Value {
 }
 
 fn tools() -> Vec<Value> {
+    let mut list = catalogue();
+    for t in &mut list {
+        if OPEN_WORLD.contains(&t["name"].as_str().unwrap_or_default()) {
+            t["annotations"]["openWorldHint"] = json!(true);
+        }
+    }
+    list
+}
+
+fn catalogue() -> Vec<Value> {
     let s = |d: &str| json!({ "type": "string", "description": d });
     let n = |d: &str| json!({ "type": "integer", "description": d });
     let b = |d: &str| json!({ "type": "boolean", "description": d });
@@ -135,7 +148,7 @@ fn tools() -> Vec<Value> {
         tool("runner_run", "Run one of this machine's runner recipes now (waits for it; uploads if a bucket is set). Results land in the outbox; import or collect them.", json!({ "recipe_id": s("Recipe ID") }), &["recipe_id"], false, false),
         tool("runner_run_due", "Run every due recipe on this machine's runner now, as the timer would.", json!({}), &[], false, false),
         tool("runner_upload", "Upload this runner's waiting batches to its bucket now.", json!({}), &[], false, false),
-        tool("configure_bucket", "Set the S3-compatible bucket for the runner (uploads; use a write-only key) or the collector (this computer's imports; use a read-only key). The secret can come from secret_file instead of the conversation. Replacing existing settings needs confirm: true (ask the person).", json!({ "role": s("runner or collector"), "endpoint": s("https://host[:port]"), "bucket": s("Bucket name"), "region": s("e.g. us-east-1, R2: auto"), "prefix": s("Folder prefix, e.g. pss/"), "access_key_id": s("Access key ID"), "secret_access_key": s("Secret (passes through the conversation)"), "secret_file": s("Path to a file holding the secret instead"), "confirm": confirm_prop() }), &["role", "endpoint", "bucket", "access_key_id"], false, false),
+        tool("configure_bucket", "Propose S3-compatible bucket settings for the runner (uploads; use a write-only key) or the collector (this computer's imports; use a read-only key). They take effect only after the person approves them in the dashboard (Settings). The secret can come from secret_file instead of the conversation.", json!({ "role": s("runner or collector"), "endpoint": s("https://host[:port]"), "bucket": s("Bucket name"), "region": s("e.g. us-east-1, R2: auto"), "prefix": s("Folder prefix, e.g. pss/"), "access_key_id": s("Access key ID"), "secret_access_key": s("Secret (passes through the conversation)"), "secret_file": s("Path to a file holding the secret instead") }), &["role", "endpoint", "bucket", "access_key_id"], false, false),
         tool("remove_bucket_config", "Delete the runner's or the collector's bucket settings.", json!({ "role": s("runner or collector"), "confirm": confirm_prop() }), &["role", "confirm"], false, true),
         tool("test_bucket", "Check the collector's bucket settings by listing the runner folders in the bucket.", json!({}), &[], true, false),
         tool("schedule", "The runner's timer: action install (every_minutes 1–60, dividing 60), uninstall (needs confirm), status or print.", json!({ "action": s("install, uninstall, status or print"), "every_minutes": n("How often to check for due recipes"), "confirm": confirm_prop() }), &["action"], false, false),
@@ -191,7 +204,10 @@ fn call_tool(name: &str, args: &Value) -> ToolResult {
         "runner_status" => runner_status(),
         "runner_add_bundle" => {
             let text = match (args["path"].as_str(), args["bundle"].as_str()) {
-                (Some(p), _) => runner::bundle_file(Path::new(p))?,
+                (Some(p), _) => {
+                    local_path(Path::new(p))?;
+                    runner::bundle_file(Path::new(p))?
+                }
                 (None, Some(t)) => t.to_string(),
                 _ => return Err("Give `path` or `bundle`".into()),
             };
@@ -257,9 +273,14 @@ fn call_tool(name: &str, args: &Value) -> ToolResult {
     }
 }
 
+/// With Claude access off, only says so (and creates nothing, such as a runner key).
 fn status() -> ToolResult {
-    let extension = if mailbox::bridge_connected() { bridge("status", json!({})).unwrap_or_else(|e| json!({ "error": e })) } else { json!({ "connected": false, "note": "Open Chrome and turn on Claude access in the Pocket Scraper Secure dashboard." }) };
-    Ok(json!({ "extension": extension, "runner": runner_status()?, "collector": bucket_summary(&transport::collector_config_path()) }))
+    if !mailbox::bridge_connected() {
+        return Ok(json!({ "connected": false, "note": NOT_CONNECTED }));
+    }
+    let extension = bridge("status", json!({})).unwrap_or_else(|e| json!({ "error": e }));
+    let pending: Vec<Value> = transport::pending_buckets().iter().map(|p| json!({ "role": p.role, "endpoint": p.endpoint, "bucket": p.bucket })).collect();
+    Ok(json!({ "connected": true, "extension": extension, "runner": runner_status()?, "collector": bucket_summary(&transport::collector_config_path()), "bucketsWaitingForApproval": pending }))
 }
 
 fn bucket_summary(path: &Path) -> Value {
@@ -327,11 +348,15 @@ fn write_new(path: &str, content: &[u8], extensions: &[&str]) -> Result<PathBuf,
     if !p.is_absolute() {
         return Err("Give an absolute path".into());
     }
+    local_path(&p)?;
     if !p.extension().and_then(|e| e.to_str()).is_some_and(|e| extensions.contains(&e)) {
         return Err(format!("The file name must end in .{}", extensions.join(" or .")));
     }
     if p.components().any(|c| matches!(c, Component::ParentDir) || matches!(c, Component::Normal(n) if n.to_string_lossy().starts_with('.'))) {
         return Err("Choose a path without hidden files or folders, or ..".into());
+    }
+    if !p.parent().is_some_and(Path::is_dir) {
+        return Err("Choose a folder that already exists".into());
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -383,6 +408,7 @@ fn import_batches(args: &Value) -> ToolResult {
     let mut files = vec![];
     for p in paths.iter().filter_map(Value::as_str) {
         let p = PathBuf::from(p);
+        local_path(&p)?;
         if p.is_dir() {
             let mut inner: Vec<PathBuf> = std::fs::read_dir(&p).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).filter(|f| f.extension().and_then(|x| x.to_str()) == Some("pssbatch")).collect();
             inner.sort();
@@ -469,22 +495,30 @@ fn collect(retry_deferred: bool) -> ToolResult {
 }
 
 fn role_path(role: &str) -> Result<PathBuf, String> {
-    match role {
-        "runner" => Ok(transport::runner_config_path()),
-        "collector" => Ok(transport::collector_config_path()),
-        _ => Err("role is runner or collector".into()),
+    transport::role_config_path(role)
+}
+
+/// Only paths on this machine: a Windows network path (\\host\share) would make
+/// Windows connect out, and send the account's credentials, just by opening it.
+fn local_path(p: &Path) -> Result<(), String> {
+    use std::path::{Component, Prefix};
+    match p.components().next() {
+        Some(Component::Prefix(prefix)) if !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => Err("Use a path on this computer, not a network or device path".into()),
+        _ => Ok(()),
     }
 }
 
+/// Where data goes is the person's decision: settings from Claude wait in a pending
+/// file until approved in the dashboard (a new endpoint could otherwise carry data
+/// off the machine, even in its folder names).
 fn configure_bucket(args: &Value) -> ToolResult {
     let path = role_path(arg(args, "role")?)?;
-    if path.is_file() && args["confirm"].as_bool() != Some(true) {
-        let current = bucket_summary(&path);
-        return Err(format!("The {} already uses bucket {} at {}. Replacing it needs confirm: true; ask the person first.", arg(args, "role")?, current["bucket"], current["endpoint"]));
-    }
     let secret = match (args["secret_access_key"].as_str(), args["secret_file"].as_str()) {
         (Some(s), _) if !s.is_empty() => s.to_string(),
-        (_, Some(f)) => std::fs::read_to_string(f).map_err(|e| format!("Could not read {f}: {e}"))?.trim().to_string(),
+        (_, Some(f)) => {
+            local_path(Path::new(f))?;
+            std::fs::read_to_string(f).map_err(|e| format!("Could not read {f}: {e}"))?.trim().to_string()
+        }
         _ => return Err("Give secret_access_key, or secret_file (keeps the secret out of the conversation)".into()),
     };
     let cfg = Config {
@@ -496,6 +530,32 @@ fn configure_bucket(args: &Value) -> ToolResult {
         secret_access_key: secret,
     };
     pocket_scraper_host::paths::private_dir(path.parent().expect("config dir")).map_err(|e| e.to_string())?;
-    cfg.save(&path)?;
-    Ok(json!({ "saved": path, "summary": bucket_summary(&path) }))
+    let pending = transport::pending_path(&path);
+    cfg.save(&pending)?;
+    Ok(json!({ "proposed": bucket_summary(&pending), "replaces": path.is_file(), "note": "Waiting for the person to approve it in the Pocket Scraper Secure dashboard (Settings). Until then nothing changes." }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_paths_on_this_computer() {
+        assert!(local_path(Path::new("/tmp/records.csv")).is_ok());
+        if cfg!(windows) {
+            assert!(local_path(Path::new(r"C:\Users\me\records.csv")).is_ok());
+            assert!(local_path(Path::new(r"\\?\C:\Users\me\records.csv")).is_ok());
+            for remote in [r"\\host\share\a.csv", r"\\host@SSL\share\a.csv", r"\\?\UNC\host\share\a.csv", r"\\.\pipe\x"] {
+                assert!(local_path(Path::new(remote)).is_err(), "{remote}");
+            }
+        }
+    }
+
+    #[test]
+    fn network_tools_are_marked() {
+        let tools = tools();
+        let hint = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["openWorldHint"].as_bool();
+        assert_eq!(hint("collect_from_bucket"), Some(true));
+        assert_eq!(hint("list_recipes"), Some(false));
+    }
 }

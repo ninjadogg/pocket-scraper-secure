@@ -20,7 +20,11 @@ const restricted = Promise.all([chrome.storage.local, chrome.storage.session].ma
     return false;
   })));
 
-chrome.runtime.onInstalled.addListener(() => void setup());
+chrome.runtime.onInstalled.addListener(details => {
+  void setup();
+  // First install: the dashboard, where the vault is created, comes first.
+  if (details.reason === 'install') void chrome.runtime.openOptionsPage();
+});
 chrome.runtime.onStartup.addListener(() => void setup());
 
 async function setup() {
@@ -109,6 +113,11 @@ async function handlePage(m: PageRequest): Promise<unknown> {
       if (result.ok && m.action === 'close') await setAttention(entry.recipe.url, false);
       return result;
     }
+    case 'approveRecipe': {
+      if (!(await store.getRecipes())[m.id]) throw new Error('Unknown recipe');
+      await mutateRecipes(recipes => { if (recipes[m.id]) delete recipes[m.id].review; });
+      return { ok: true };
+    }
     case 'clearAttention': {
       const entry = (await store.getRecipes())[m.id];
       if (!entry) throw new Error('Unknown recipe');
@@ -120,20 +129,26 @@ async function handlePage(m: PageRequest): Promise<unknown> {
   }
 }
 
-/** `allowPending`: save even before the site is allowed (requests from Claude, which
- * can't grant permissions; the dashboard then offers Allow access). */
-async function saveRecipe(input: unknown, allowPending = false): Promise<Recipe> {
+/** What a recipe opens and clicks: a change to any of these from Claude needs the
+ * person's review (it runs with the person's own browser sessions). */
+const reach = (r: Recipe) => JSON.stringify([r.url, r.actions, r.workflow, r.nextSelector, r.useNativeHost]);
+
+/** `fromClaude`: save even before the site is allowed (Claude can't grant
+ * permissions; the dashboard then offers Allow access), and hold new or redirected
+ * recipes for review. Saved by the person, a recipe is reviewed. */
+async function saveRecipe(input: unknown, fromClaude = false): Promise<Recipe> {
   const core = await loadCore();
   const json = JSON.stringify(input);
   const recipe = JSON.parse(core.validateRecipe(json)) as Recipe;
   const origin = core.recipeOrigin(json);
-  if (!allowPending && !(await chrome.permissions.contains({ origins: [origin + '/*'] }))) {
+  if (!fromClaude && !(await chrome.permissions.contains({ origins: [origin + '/*'] }))) {
     throw new Error(`Allow Pocket Scraper Secure to access ${origin} first.`);
   }
   await mutateRecipes(recipes => {
     const now = new Date().toISOString();
     const previous = recipes[recipe.id];
-    recipes[recipe.id] = { recipe, createdAt: previous?.createdAt ?? now, updatedAt: now, needsAttention: previous?.needsAttention ?? false };
+    const review = fromClaude && (!previous || previous.review === true || reach(previous.recipe) !== reach(recipe));
+    recipes[recipe.id] = { recipe, createdAt: previous?.createdAt ?? now, updatedAt: now, needsAttention: previous?.needsAttention ?? false, ...(review ? { review: true } : {}) };
   });
   await syncAlarms();
   return recipe;
@@ -162,6 +177,7 @@ async function startRun(id: string, trigger: RunRecord['trigger'], runId: string
     const header = await store.getVaultHeader();
     if (!header) return 'Set up the vault in the dashboard first: results are only ever stored encrypted.';
     if (entry.needsAttention && trigger === 'schedule') return 'Paused: the site needs attention.';
+    if (entry.review) return 'Claude created or changed this recipe: review and approve it in the dashboard first.';
     started = true;
     void runRecipe(entry, header, trigger, runId).finally(() => running.delete(id));
     return undefined;
@@ -362,6 +378,7 @@ async function bridgeCommand(command: string, args: Record<string, unknown>): Pr
       return Promise.all(entries.map(async e => ({
         ...e.recipe,
         needsAttention: e.needsAttention,
+        waitingForReview: e.review === true,
         siteAllowed: await chrome.permissions.contains({ origins: [new URL(e.recipe.url).origin + '/*'] }),
         records: await store.countRecords(e.recipe.id),
         updatedAt: e.updatedAt
@@ -370,7 +387,9 @@ async function bridgeCommand(command: string, args: Record<string, unknown>): Pr
     case 'saveRecipe': {
       const recipe = await saveRecipe(args.recipe, true);
       const allowed = await chrome.permissions.contains({ origins: [new URL(recipe.url).origin + '/*'] });
-      return { recipe, siteAllowed: allowed, ...(allowed ? {} : { note: `Before it can run, the person must click Allow access for ${new URL(recipe.url).origin} in the dashboard.` }) };
+      const review = (await store.getRecipes())[recipe.id]?.review === true;
+      const waits = [review ? 'review and approve it' : '', allowed ? '' : `click Allow access for ${new URL(recipe.url).origin}`].filter(Boolean);
+      return { recipe, siteAllowed: allowed, waitingForReview: review, ...(waits.length ? { note: `Before it can run, the person must ${waits.join(' and ')} in the dashboard.` } : {}) };
     }
     case 'deleteRecipe': {
       const id = text(args.id, 'id');

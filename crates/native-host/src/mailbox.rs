@@ -102,7 +102,8 @@ pub fn clear_requests() {
 pub fn bridge_connected() -> bool {
     let Ok(d) = ensure() else { return false };
     match File::options().create(true).truncate(false).write(true).open(d.join("bridge.lock")) {
-        Ok(f) => match f.try_lock() {
+        // A shared probe: probes never block each other, only a bridge's exclusive lock.
+        Ok(f) => match f.try_lock_shared() {
             Ok(()) => {
                 let _ = f.unlock();
                 false

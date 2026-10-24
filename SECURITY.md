@@ -6,9 +6,11 @@ covering what it protects against and what it doesn't, is in
 
 ## Reporting
 
-Use GitHub private vulnerability reporting on this repository. Don't put exploit
-details, passphrases, vault headers, cookies, browser profiles or scraped data in
-public issues. Test only systems and accounts you own or may test.
+Use GitHub private vulnerability reporting: the **Security** tab → **Report a
+vulnerability**. If that isn't available, open an issue that only asks for a private
+contact, with no details. Don't put exploit details, passphrases, vault headers,
+cookies, browser profiles or scraped data in public issues. Test only systems and
+accounts you own or may test.
 
 ## Guarantees this project keeps
 
@@ -17,7 +19,10 @@ public issues. Test only systems and accounts you own or may test.
 - **Encrypted records.** Records are stored sealed. Plaintext exists only:
   - in the page being scraped;
   - in the run's memory before sealing;
-  - in the unlocked dashboard.
+  - in the unlocked dashboard;
+  - in files you export (CSV or JSON, from the dashboard or `export_records`);
+  - if you use Claude access: in `pocket-scraper-mcp`'s memory and in your Claude
+    conversation, which is sent to Anthropic's API, for records Claude reads.
 - **Key handling.** The vault's secret key is never written unwrapped and never
   leaves the dashboard's WebAssembly memory. It is zeroized on lock. Passphrase
   copies inside WebAssembly are wiped after use, but the browser's own JavaScript
@@ -46,7 +51,12 @@ public issues. Test only systems and accounts you own or may test.
 - A forgotten passphrase cannot be recovered.
 - While **Claude access** is on, programs running as your OS user can drive the
   extension through the MCP mailbox. Records stay unreadable while the vault is
-  locked. Keep it off when you aren't using it (see docs/MCP.md).
+  locked. Recipes, runners and buckets set up that way wait for your approval. Keep
+  it off when you aren't using it (see docs/MCP.md).
+- The extension's ID comes from the public key in its manifest. Any unpacked copy
+  carrying that key gets the same ID, and the native host trusts it. Only load the
+  extension from a source you trust; installing one is equivalent to having write
+  access to your Chrome profile (A12 in the threat model).
 - A runner machine that is taken over can't read results, but it can use its website
   sessions and send false data in its own name. Remove it under Runners to stop
   accepting its batches.

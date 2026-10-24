@@ -9,6 +9,8 @@ const g = globalThis as unknown as PickerGlobal;
 
 g.__pssPicker = (options: PickerOptions) => {
   g.__pssPickerCleanup?.();
+  // A finished picker may still be showing its "Got it" note.
+  for (const old of document.querySelectorAll('pss-picker')) old.remove();
   const { mode, nonce, rowSelector, kind } = options;
   let root: ParentNode = document;
   let hovered: Element | null = null;
@@ -23,7 +25,8 @@ g.__pssPicker = (options: PickerOptions) => {
     borderRadius: '8px', font: '13px system-ui, sans-serif', boxShadow: '0 2px 10px #0006'
   });
   Object.assign(box.style, { position: 'fixed', border: '3px solid #f97316', borderRadius: '3px', display: 'none' });
-  banner.textContent = `Pocket Scraper Secure: click the ${{ row: 'record container', field: 'field', action: 'element to click', next: 'Next button' }[mode]}. Esc cancels.`;
+  const what = { row: 'one repeating item (a card or a row)', field: 'the value to collect, inside one record', action: 'the button or link to click', next: 'the Next or Load more button' }[mode];
+  banner.textContent = `Pocket Scraper Secure: click ${what}. Esc cancels.`;
   shadow.append(banner, box);
   document.documentElement.append(host);
 
@@ -135,7 +138,11 @@ g.__pssPicker = (options: PickerOptions) => {
     // Fields are relative to their container, and so is their match count.
     const selector = selectorFor(el, mode !== 'field' && mode !== 'row');
     const matches = count(selector);
-    cleanup();
+    detach();
+    // Confirm the pick where the person is looking, then get out of the way.
+    banner.textContent = `Got it${mode === 'row' ? ` (${matches} on this page)` : ''}. Click the Pocket Scraper Secure button in the toolbar to continue.`;
+    box.style.display = 'none';
+    setTimeout(() => host.remove(), 2500);
     void chrome.runtime.sendMessage({ type: 'pick', nonce, selector, matches }).catch(() => {});
   }
 
@@ -145,6 +152,10 @@ g.__pssPicker = (options: PickerOptions) => {
 
   function cleanup() {
     host.remove();
+    detach();
+  }
+
+  function detach() {
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('keydown', onKey, true);

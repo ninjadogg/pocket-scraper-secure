@@ -143,6 +143,11 @@ pub fn handle(bytes: &[u8]) -> Vec<Response> {
         Request::BridgeReply { .. } => vec![Response::Error { message: "No bridge is open on this connection".into() }],
         Request::CollectBatches { retry_deferred } => crate::transport::collect(20, retry_deferred),
         Request::AckBatches { keys, deferred } => vec![crate::transport::ack(keys, deferred)],
+        Request::PendingBuckets {} => vec![Response::PendingBuckets { items: crate::transport::pending_buckets() }],
+        Request::DecideBucket { role, approve } => match crate::transport::decide_bucket(&role, approve) {
+            Ok(()) => vec![Response::BucketDecided { role, approved: approve }],
+            Err(message) => vec![Response::Error { message }],
+        },
         Request::CloseSession { url } => match url::parse(&url) {
             Err(e) => vec![Response::Error { message: e.to_string() }],
             Ok(u) if paths::profile_dir(&u.origin).map(|p| browser::profile_in_use(&p)).unwrap_or(false) => {

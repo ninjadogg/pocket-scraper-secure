@@ -46,19 +46,19 @@ function render() {
 
   const kinds: Record<string, string> = { text: 'text', href: 'link', value: 'value', html: 'HTML' };
   $('fields').replaceChildren(...(draft.fields.length ? draft.fields.map((f, i) => {
-    const selector = h('input', { value: f.selector, title: 'Where it is on the page (a CSS selector; edit if needed)', onchange: () => { f.selector = selector.value; void persist(); } });
+    const selector = h('input', { value: f.selector, title: 'Where it is on the page (a CSS selector; edit if needed)', ariaLabel: `Where ${f.name} is on the page`, onchange: () => { f.selector = selector.value; void persist(); } });
     return h('div', { className: 'item field-item' },
       h('span', { className: 'name', title: `${f.name} (${kinds[f.kind] ?? f.kind})` }, f.name), h('span', { className: 'small' }, kinds[f.kind] ?? f.kind), selector,
-      h('button', { className: 'tight danger', title: `Remove ${f.name}`, onclick: async () => { draft.fields.splice(i, 1); await persist(); render(); } }, '×'));
+      h('button', { className: 'tight danger', title: `Remove ${f.name}`, ariaLabel: `Remove field ${f.name}`, onclick: async () => { draft.fields.splice(i, 1); await persist(); render(); } }, '×'));
   }) : [h('p', { className: 'small' }, 'No fields yet.')]));
   $('fieldCount').textContent = draft.fields.length ? `${draft.fields.length} field${draft.fields.length === 1 ? '' : 's'}` : '';
   $('step1').classList.toggle('done', Boolean(draft.url && draft.rowSelector));
   $('step2').classList.toggle('done', draft.fields.length > 0);
 
   const removable = (label: string, value: string, onchange: (v: string) => void, remove: () => void) => {
-    const selector = h('input', { value, onchange: () => { onchange(selector.value); void persist(); } });
+    const selector = h('input', { value, ariaLabel: label, onchange: () => { onchange(selector.value); void persist(); } });
     return h('div', { className: 'item' }, h('div', { className: 'small' }, label),
-      h('div', { className: 'row' }, selector, h('button', { className: 'tight danger', title: 'Remove', onclick: async () => { remove(); await persist(); render(); } }, '×')));
+      h('div', { className: 'row' }, selector, h('button', { className: 'tight danger', title: 'Remove', ariaLabel: `Remove: ${label}`, onclick: async () => { remove(); await persist(); render(); } }, '×')));
   };
   const pageItems: HTMLElement[] = draft.actions.map((a, i) =>
     removable(`Click ${i + 1}, before collecting`, a.selector, v => { a.selector = v; }, () => draft.actions.splice(i, 1)));
@@ -76,11 +76,11 @@ function stepItem(step: Step, i: number, steps: Step[]): HTMLElement {
   const title = step.type === 'extract' ? 'Collect the fields' : step.type === 'click' ? 'Click' : 'Wait';
   const item = h('div', { className: 'item' }, h('div', {}, `${i + 1}. ${title}`));
   if (step.type === 'click') {
-    const selector = h('input', { value: step.selector, title: 'Click target', onchange: () => { step.selector = selector.value; void persist(); } });
+    const selector = h('input', { value: step.selector, title: 'Click target', ariaLabel: `Step ${i + 1}: what to click`, onchange: () => { step.selector = selector.value; void persist(); } });
     item.append(selector);
   }
   if (step.type !== 'extract') {
-    const wait = h('input', { type: 'number', min: '0', max: '30000', value: String(step.waitMs), title: 'Wait in milliseconds', onchange: () => { step.waitMs = Number(wait.value); void persist(); } });
+    const wait = h('input', { type: 'number', min: '0', max: '30000', value: String(step.waitMs), title: 'Wait in milliseconds', ariaLabel: `Step ${i + 1}: wait in milliseconds`, onchange: () => { step.waitMs = Number(wait.value); void persist(); } });
     item.append(h('div', { className: 'small' }, step.type === 'click' ? 'Then wait (ms)' : 'Wait (ms)'), wait);
   }
   const move = (delta: number) => async () => {
@@ -89,9 +89,9 @@ function stepItem(step: Step, i: number, steps: Step[]): HTMLElement {
     render();
   };
   item.append(h('div', { className: 'row' },
-    h('button', { disabled: i === 0, onclick: move(-1) }, 'Up'),
-    h('button', { disabled: i === steps.length - 1, onclick: move(1) }, 'Down'),
-    h('button', { className: 'danger', onclick: async () => { steps.splice(i, 1); await persist(); render(); } }, 'Remove')));
+    h('button', { disabled: i === 0, ariaLabel: `Move step ${i + 1} up`, onclick: move(-1) }, 'Up'),
+    h('button', { disabled: i === steps.length - 1, ariaLabel: `Move step ${i + 1} down`, onclick: move(1) }, 'Down'),
+    h('button', { className: 'danger', ariaLabel: `Remove step ${i + 1}`, onclick: async () => { steps.splice(i, 1); await persist(); render(); } }, 'Remove')));
   return item;
 }
 
@@ -117,6 +117,15 @@ async function pick(mode: PickMode) {
   }
 }
 
+/** Whether the draft holds work the person would lose by switching recipes. */
+function unsaved(): boolean {
+  readInputs();
+  const shape = (r: Partial<Recipe>) => JSON.stringify([r.name ?? '', r.url ?? '', r.rowSelector ?? '', r.fields ?? [], r.actions ?? [], r.nextSelector ?? '', r.workflow ?? null]);
+  const saved = draft.id ? recipes[draft.id]?.recipe : undefined;
+  if (saved) return shape(recipeInput()) !== shape(saved);
+  return Boolean(draft.rowSelector || draft.fields.length || draft.actions.length || draft.name?.trim());
+}
+
 /** The recipe as the core expects it; the core validates and fills defaults. */
 function recipeInput(): Partial<Recipe> {
   return {
@@ -134,9 +143,29 @@ function recipeInput(): Partial<Recipe> {
   };
 }
 
+/** Problems a person can fix, in plain words, before the core's own checks. Marks
+ * the inputs and focuses the first. */
+function problems(): string[] {
+  const found: [string, string][] = [];
+  if (!draft.name?.trim()) found.push(['name', 'Name this recipe (step 1).']);
+  if (!draft.url) found.push(['url', 'Add the starting page (step 1): open the site and click This page.']);
+  else if (!/^https?:\/\//i.test(draft.url)) found.push(['url', 'The starting page must start with http:// or https://.']);
+  if (!draft.rowSelector) found.push(['rowSelector', 'Pick one record on the page (step 1).']);
+  else if (!validSelector(draft.rowSelector)) found.push(['rowSelector', '“One record is…” isn’t a page selector. Use Pick on page instead.']);
+  if (!draft.fields.length) found.push(['fieldName', 'Add at least one field (step 2): type a name, click Pick, then click a value on the page.']);
+  for (const id of ['name', 'url', 'rowSelector', 'fieldName']) $(id).removeAttribute('aria-invalid');
+  for (const [id] of found) $(id).setAttribute('aria-invalid', 'true');
+  if (found.length) $(found[0][0]).focus();
+  return found.map(([, text]) => text);
+}
+
+const validSelector = (s: string) => { try { return CSS.supports(`selector(${s})`); } catch { return false; } };
+
 async function save(runAfter: boolean) {
   try {
     readInputs();
+    const missing = problems();
+    if (missing.length) return say(missing.join('\n'), true);
     const core = await corePromise;
     const json = JSON.stringify(recipeInput());
     core.validateRecipe(json);
@@ -168,9 +197,10 @@ async function loadRecipes() {
 async function showStatus() {
   const vault = await store.getVaultHeader();
   const host = await send<{ installed: boolean }>({ type: 'hostStatus' }).catch(() => ({ installed: false }));
-  $('status').textContent = vault ? 'Vault ready: results are stored encrypted.' : 'Set up the vault in the dashboard before running recipes.';
+  $('status').textContent = vault ? 'Vault ready: results are stored encrypted.' : '';
+  $('vaultBanner').hidden = Boolean(vault);
   input('useNativeHost').disabled = !host.installed && !draft.useNativeHost;
-  $('hostNote').textContent = host.installed ? 'Uses a separate browser profile on this computer, so it can run while this window is closed.' : 'Needs the native host (not installed). Runs use a background tab in this browser.';
+  $('hostNote').textContent = host.installed ? 'Its own profile on this computer: it can run while Chrome is closed.' : 'The helper app isn’t installed, so runs use a background tab in this browser.';
 }
 
 function bind() {
@@ -194,6 +224,10 @@ function bind() {
     render();
   };
   select('saved').onchange = async () => {
+    if (unsaved() && !confirm(`Discard the unsaved recipe “${draft.name?.trim() || 'New recipe'}”?`)) {
+      select('saved').value = draft.id && recipes[draft.id] ? draft.id : '';
+      return;
+    }
     const entry = recipes[select('saved').value];
     draft = entry ? { ...entry.recipe, fields: [...entry.recipe.fields], actions: [...entry.recipe.actions] } : store.emptyDraft();
     await store.setDraft(draft);
@@ -203,18 +237,30 @@ function bind() {
   $('save').onclick = () => save(false);
   $('saveRun').onclick = () => save(true);
   $('dashboard').onclick = () => chrome.runtime.openOptionsPage();
+  $('setupVault').onclick = () => chrome.runtime.openOptionsPage();
+  input('rowSelector').addEventListener('change', () => {
+    const v = input('rowSelector').value.trim();
+    if (v && !validSelector(v)) say('That isn’t a page selector. Use Pick on page instead.', true);
+  });
 }
 
 const TOUR: TourStep[] = [
-  { target: '#saved', title: 'Teach it once', body: 'A recipe tells Pocket Scraper what to collect from a site. Start with New recipe, or pick a saved one to change it.' },
   { target: '#useTab', title: 'Start on the site', body: 'Open the page you want to collect from, then click This page.' },
   { target: '#pickRow', title: 'Pick one record', body: 'Click Pick on page, then click one repeating item: a card, a list item or a table row. Each one becomes a record. The popup closes while you pick; reopen it to carry on.' },
   { target: '#addField', title: 'Add the fields', body: 'Name a field (say, price), click Pick, then click that value inside one record. Repeat for each value you want.' },
-  { target: '#pickNext', title: 'More pages', body: 'If the results run over several pages, pick the Next or Load more button, and set how many pages to collect.' },
-  { target: '#schedule', title: 'Run it on a schedule', body: 'Choose how often it runs by itself. Tick Run in a private browser to use the native host, which keeps working while Chrome is closed.' },
-  { target: '#saveRow', title: 'Save and run', body: 'Save asks Chrome to allow this site. Results are encrypted as they arrive; read them in the Dashboard after unlocking your vault.' },
-  { target: '#tour', title: 'Any time', body: 'Click Tour to see this again.' }
+  { target: '#saveRow', title: 'Save and run', body: 'Save asks Chrome to allow this site. Results are encrypted as they arrive; read them in the Dashboard. Click Tour at the top to see this again.' }
 ];
+
+/** After a pick the popup reopens: bring the next thing to do into view. */
+function focusNext() {
+  const kind = draft.lastPick?.split(':')[0];
+  if (kind === 'row' || kind === 'field') {
+    $('step2').scrollIntoView({ block: 'nearest' });
+    input('fieldName').focus();
+  } else if (kind === 'next' || kind === 'action') {
+    $('step3').scrollIntoView({ block: 'nearest' });
+  }
+}
 
 (async () => {
   draft = await store.getDraft();
@@ -223,5 +269,6 @@ const TOUR: TourStep[] = [
   await loadRecipes();
   render();
   await showStatus();
+  focusNext();
   await tourOnce('popup', TOUR);
 })().catch(e => say((e as Error).message, true));

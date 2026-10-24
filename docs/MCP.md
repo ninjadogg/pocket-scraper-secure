@@ -19,9 +19,9 @@ results from files or a bucket, and change the bucket, timer and extension setti
 
 | Area | Tools | Needs |
 |---|---|---|
-| Overview | `status` | — (works with access off, to say so) |
+| Overview | `status` | — (with access off it only says so) |
 | Extension settings | `get_settings`, `update_settings` (run timeout, auto-lock) | Claude access |
-| Recipes | `list_recipes`, `save_recipe`, `delete_recipe`¹ | Claude access |
+| Recipes | `list_recipes`, `save_recipe`⁴, `delete_recipe`¹ | Claude access |
 | Runs | `run_recipe` (optionally waits for the result), `list_runs` | Claude access |
 | Records | `read_records`, `export_records` (to a new owner-only file) | Claude access and **the dashboard unlocked** |
 | Runners | `list_runners`, `enroll_runner`², `remove_runner`¹ | Claude access |
@@ -35,7 +35,14 @@ results from files or a bucket, and change the bucket, timer and extension setti
 is told to ask you first.
 ² A runner Claude enrols stays **pending**: its results are refused until you compare
 its fingerprint and click **Approve** under Runners.
-³ Replacing existing bucket settings also needs `confirm: true`.
+³ Bucket settings from Claude are only a **proposal**. They take effect once you
+approve them in the dashboard (Settings → Helper app). The prefix is at most 64
+characters and the bucket name 3–63.
+⁴ A recipe Claude creates, or changes in where it goes or what it clicks (address,
+clicks, Next button, workflow, where it runs), **waits for your review**. Until you
+open **Review** on the Recipes tab and approve it, it doesn't run (on demand or on
+schedule) and can't be signed for runners. Renaming it or changing its fields or
+schedule doesn't need a new review.
 
 Tools that act on this machine (runner, bucket, timer, browser) need Claude access on
 too, even though they don't go through Chrome.
@@ -49,6 +56,8 @@ Some things Claude can't do:
   and can't be signed for a runner.
 - Make this machine's runner trust another vault. It pins only the fingerprint the
   extension reports.
+- Send data somewhere new. A new bucket waits for your approval, and paths must be on
+  this computer (no Windows network shares).
 - Write exports anywhere it likes. Exports go only to new `.csv`, `.json` or
   `.pssbundle` files, and never to hidden files or folders.
 

@@ -41,14 +41,14 @@ impl Config {
         if scheme != "https" && !local {
             return Err("The endpoint must start with https://".into());
         }
-        if self.bucket.is_empty() || !self.bucket.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.') {
-            return Err("Bucket names are lower-case letters, digits, dots and dashes".into());
+        if !(3..=63).contains(&self.bucket.len()) || !self.bucket.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.') {
+            return Err("Bucket names are 3–63 lower-case letters, digits, dots and dashes".into());
         }
         if self.region.is_empty() || !self.region.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Err("Give the region, e.g. us-east-1 (R2: auto)".into());
         }
-        if self.prefix.contains("..") || self.prefix.starts_with('/') || !self.prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b)) {
-            return Err("The prefix may use letters, digits and - _ . /".into());
+        if self.prefix.len() > 64 || self.prefix.contains("..") || self.prefix.starts_with('/') || !self.prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b)) {
+            return Err("The prefix is up to 64 letters, digits and - _ . /".into());
         }
         if self.access_key_id.is_empty() || self.access_key_id.len() > 128 || !self.access_key_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
             return Err("The access key ID is letters, digits, - and _".into());
@@ -249,6 +249,11 @@ mod tests {
 
     #[test]
     fn config_checks() {
+        let base = Config { endpoint: "https://s3.example.com".into(), bucket: "bucket".into(), region: "us-east-1".into(), prefix: String::new(), access_key_id: "AK".into(), secret_access_key: "s".into() };
+        assert!(Config { bucket: "ab".into(), ..base.clone() }.check().is_err(), "bucket names are 3-63 characters");
+        assert!(Config { bucket: "a".repeat(64), ..base.clone() }.check().is_err());
+        assert!(Config { prefix: "p".repeat(65), ..base.clone() }.check().is_err(), "a prefix can't carry much data");
+        assert!(Config { prefix: "pss/".into(), ..base.clone() }.check().is_ok());
         let ok = Config { endpoint: "https://s3.us-east-1.amazonaws.com".into(), bucket: "my-bucket".into(), region: "us-east-1".into(), prefix: "pss/".into(), access_key_id: "AK".into(), secret_access_key: "S".into() };
         assert!(ok.check().is_ok());
         for bad in [

@@ -37,9 +37,11 @@ permissions, not encryption, as on the desktop (see `THREAT_MODEL.md`, A7).
 
 ## Set up a runner
 
-Binaries for Linux x64, Linux arm64, macOS and Windows are attached to every CI run
-(Actions → the run → Artifacts). You can also build one with
-`cargo build --release -p pocket-scraper-host`.
+Build the runner from source with `cargo build --release -p pocket-scraper-host`; it
+works on Linux x64, Linux arm64, macOS and Windows. CI builds these binaries for
+commits on `main` only, never for pull requests. Don't run binaries from anywhere
+else, such as a fork or a pull request's checks: the native host runs with your
+account's access.
 
 ```
 pocket-scraper-runner init

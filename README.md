@@ -13,8 +13,11 @@ the results stay encrypted, all without a network listener.
 | Site access | Any site | Only origins you grant, per recipe |
 | Extension pages | CSP | CSP plus Trusted Types, no HTML strings |
 
-Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
-before relying on it.
+**Status: early (0.1).** The code has been through several in-depth security reviews
+during development, and their findings are fixed or documented in the threat model.
+It has **not** had an independent third-party audit. Read
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
+before relying on it, and report problems as [SECURITY.md](SECURITY.md) describes.
 
 ## Build
 
@@ -29,6 +32,10 @@ cargo install --locked --root .tools wasm-bindgen-cli --version 0.2.129
 npm run build                                              # → extension/dist
 npm test                                                   # Rust tests, WASM tests, type-check, browser end-to-end
 ```
+
+The browser end-to-end test needs Chrome for Testing, because Chrome stable ignores
+`--load-extension`. Point `PSS_E2E_BROWSER` at its executable. Without it, the test
+is skipped and the rest still run.
 
 ## Install
 
@@ -45,8 +52,12 @@ npm test                                                   # Rust tests, WASM te
    target/release/pocket-scraper-host install            # add --browser chromium|brave|edge as needed
    ```
 
-   This copies the host to `~/Library/Application Support/PocketScraperSecure/bin/` and
-   registers it for this extension's ID only. `uninstall` removes it again, and
+   This copies the host (and `pocket-scraper-mcp`, if built) into the data folder's
+   `bin/` and registers it for this extension's ID only. The data folder is:
+   - macOS: `~/Library/Application Support/PocketScraperSecure`;
+   - Linux: `$XDG_DATA_HOME/pocket-scraper-secure`, or `~/.local/share/pocket-scraper-secure`;
+   - Windows: `%LOCALAPPDATA%\PocketScraperSecure`.
+   `PSS_DATA_DIR` overrides it. `uninstall` removes it again, and
    `--purge-profiles` also deletes the saved website sessions.
 
 ## Use
@@ -69,6 +80,9 @@ npm test                                                   # Rust tests, WASM te
    - **Settings** covers the passphrase, the auto-lock (default 10 minutes) and the
      run time limit, and Claude access.
    Use **Session setup** on a recipe to sign in to its private-browser profile.
+
+Picking elements on a page needs a mouse or trackpad. With only a keyboard, you can
+type a CSS selector into each box instead.
 
 Schedules in the extension run while Chrome is open. If a site starts asking for
 sign-in or verification, its schedules pause until you deal with it in the dashboard.
@@ -95,7 +109,9 @@ disk. See [docs/RUNNER.md](docs/RUNNER.md).
 kick off runner runs, import result files or collect from a bucket, and change bucket,
 timer and extension settings. It works only once you tick **Let Claude manage Pocket
 Scraper Secure** in the dashboard. Records can be read only while the dashboard is
-unlocked, and deletes need your confirmation. See [docs/MCP.md](docs/MCP.md).
+unlocked. Recipes Claude creates or redirects, runners it enrols and bucket settings
+it proposes all wait for your approval in the dashboard. Claude is told to ask you
+before deleting anything. See [docs/MCP.md](docs/MCP.md).
 
 ## Layout
 
