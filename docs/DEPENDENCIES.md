@@ -47,6 +47,12 @@ never the person's own Chrome. It is pinned in `browser/headless-shell.json`.
 Updating the browser means changing the version and all five hashes in one commit,
 after the same cross-check.
 
+CI alone also uses the **full Chrome for Testing** (same version, linux64), because
+the extension's browser end-to-end test has to load the extension, and Chrome stable
+ignores `--load-extension`. It is pinned in `browser/chrome-for-testing.json`: SHA-256
+and size recorded on 2026-10-24 and cross-checked against Google Cloud Storage's MD5.
+The workflow checks the hash before unpacking it. Nothing in the product uses it.
+
 ## Rust crates (audited 2026-10-22, cut-off 2026-10-08)
 
 | Crate | Version | Published | Licence | Repository |

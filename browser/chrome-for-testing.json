@@ -1,0 +1,9 @@
+{
+  "comment": "Pinned full Chrome for Testing, used only by CI to run the extension's browser end-to-end test (Chrome stable ignores --load-extension). Published 2026-10-06 by Google (storage.googleapis.com/chrome-for-testing-public). Hash recorded 2026-10-24 and cross-checked against Google Cloud Storage's MD5 and size.",
+  "version": "155.0.8059.39",
+  "linux64": {
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/linux64/chrome-linux64.zip",
+    "sha256": "55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea",
+    "size": 198195769
+  }
+}

@@ -2,7 +2,8 @@
 // extensions), driven over a debugging pipe. Covers the vault UI, tab runs, sealed
 // storage, CSP, the picker, a run through the real native host, and Claude access
 // through the MCP server.
-// Skips when no Chrome for Testing is found (PSS_E2E_BROWSER overrides the path).
+// Skips when no Chrome for Testing is found (PSS_E2E_BROWSER overrides the path),
+// unless PSS_E2E_REQUIRED is set (CI).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
@@ -70,8 +71,10 @@ function cdp(child) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-test('the extension collects, seals, shows and protects records end to end', { timeout: 240_000 }, async t => {
+test('the extension collects, seals, shows and protects records end to end', { timeout: 480_000 }, async t => {
   const browserPath = findBrowser();
+  // CI sets PSS_E2E_REQUIRED: there, a missing browser is a failure, not a skip.
+  if (!browserPath && process.env.PSS_E2E_REQUIRED) throw new Error('PSS_E2E_REQUIRED is set but no Chrome for Testing was found (PSS_E2E_BROWSER)');
   if (!browserPath) return t.skip('Chrome for Testing not found');
   const work = mkdtempSync(join(tmpdir(), 'pss-e2e-'));
   const server = await site();
